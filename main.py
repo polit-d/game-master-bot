@@ -1322,8 +1322,7 @@ async def cmd_setanket(message: Message):
         message,
         event_type="Новая анкета",
         text=(
-            f"Игрок @{clean_username(message.from_user.username)}"
-            f"or 'без username'} добавил анкету."
+           f"Игрок @{clean_username(message.from_user.username) or 'без username'} добавил анкету."
         ),
         username=message.from_user.username,
         anketa_url=url
