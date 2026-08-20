@@ -54,6 +54,13 @@ GROQ_MODEL = os.getenv(
     "llama-3.3-70b-versatile"
 )
 
+# Модель для строгого JSON. Groq поддерживает strict json_schema
+# на моделях GPT-OSS, поэтому JSON-анализ не смешиваем с моделью новостей.
+GROQ_STRUCTURED_MODEL = os.getenv(
+    "GROQ_STRUCTURED_MODEL",
+    "openai/gpt-oss-20b"
+)
+
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # Для статов
@@ -281,6 +288,16 @@ CREATE TABLE IF NOT EXISTS actions (
 );
 """
 
+CREATE_PROCESSED_MESSAGES_TABLE = """
+CREATE TABLE IF NOT EXISTS processed_messages (
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    processed_at TEXT NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+"""
+
+
 CREATE_EVENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -302,6 +319,7 @@ async def init_db():
         await db.execute(CREATE_PLAYERS_TABLE)
         await db.execute(CREATE_ACTIONS_TABLE)
         await db.execute(CREATE_EVENTS_TABLE)
+        await db.execute(CREATE_PROCESSED_MESSAGES_TABLE)
 
         await db.commit()
 
@@ -419,6 +437,23 @@ async def update_username(user_id: int, username: str):
         )
 
         await db.commit()
+
+
+async def mark_message_processed(message: Message) -> bool:
+    """Возвращает True, если сообщение ещё не обрабатывалось."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute(
+                """
+                INSERT INTO processed_messages (chat_id, message_id, processed_at)
+                VALUES (?, ?, ?)
+                """,
+                (message.chat.id, message.message_id, dt_to_str(now_utc()))
+            )
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
 
 
 # ============================================================
@@ -847,77 +882,72 @@ async def cmd_random(
 # GROQ
 # ============================================================
 
-groq_available = False
+groq_news_available = False
+groq_structured_available = False
 
 
 async def check_groq_api() -> bool:
-    global groq_available
+    global groq_news_available, groq_structured_available
+
+    groq_news_available = False
+    groq_structured_available = False
 
     if not GROQ_API_KEY:
         logger.error(
-            "GROQ_API_KEY отсутствует. "
-            "ИИ-функции отключены."
+            "GROQ_API_KEY отсутствует. ИИ-функции отключены."
         )
-
-        groq_available = False
         return False
 
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}"
-    }
-
-    url = (
-        "https://api.groq.com/openai/v1/models/"
-        f"{GROQ_MODEL}"
-    )
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    timeout = aiohttp.ClientTimeout(total=15)
 
     try:
-        timeout = aiohttp.ClientTimeout(
-            total=15
-        )
-
-        async with aiohttp.ClientSession(
-            timeout=timeout
-        ) as session:
-
-            async with session.get(
-                url,
-                headers=headers
-            ) as response:
-
-                if response.status == 200:
-                    logger.info(
-                        "Groq API успешно проверен."
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for label, model_name in (
+                ("news", GROQ_MODEL),
+                ("structured", GROQ_STRUCTURED_MODEL),
+            ):
+                url = f"https://api.groq.com/openai/v1/models/{model_name}"
+                try:
+                    async with session.get(url, headers=headers) as response:
+                        body = await response.text()
+                        if response.status == 200:
+                            logger.info(
+                                "Groq model OK (%s): %s", label, model_name
+                            )
+                            if label == "news":
+                                groq_news_available = True
+                            else:
+                                groq_structured_available = True
+                        else:
+                            logger.error(
+                                "Groq model FAILED (%s): %s | HTTP %s: %s",
+                                label, model_name, response.status, body[:500]
+                            )
+                except Exception:
+                    logger.exception(
+                        "Ошибка проверки Groq model (%s): %s",
+                        label, model_name
                     )
 
-                    groq_available = True
-                    return True
-
-                body = await response.text()
-
-                logger.error(
-                    "Groq API не прошёл проверку. "
-                    "HTTP %s: %s",
-                    response.status,
-                    body[:500]
-                )
-
     except Exception:
-        logger.exception(
-            "Ошибка проверки Groq API."
-        )
+        logger.exception("Ошибка подключения к Groq API.")
 
-    groq_available = False
-    return False
+    return groq_news_available or groq_structured_available
 
 
 async def groq_request(
     messages: list,
     response_format: dict | None = None,
     temperature: float = 0.2,
-    max_tokens: int = 1000
+    max_tokens: int = 1000,
+    model_name: str | None = None
 ):
-    if not groq_available:
+    selected_model = model_name or GROQ_MODEL
+    if selected_model == GROQ_STRUCTURED_MODEL:
+        if not groq_structured_available:
+            return None
+    elif not groq_news_available:
         return None
 
     headers = {
@@ -926,7 +956,7 @@ async def groq_request(
     }
 
     data = {
-        "model": GROQ_MODEL,
+        "model": selected_model,
         "messages": messages,
         "temperature": temperature,
         "max_completion_tokens": max_tokens
@@ -1115,7 +1145,8 @@ async def analyze_stats(text: str):
         ],
         response_format=schema,
         temperature=0.1,
-        max_tokens=500
+        max_tokens=500,
+        model_name=GROQ_STRUCTURED_MODEL
     )
 
     if not content:
@@ -1231,7 +1262,8 @@ async def analyze_news_event(
         ],
         response_format=schema,
         temperature=0.2,
-        max_tokens=300
+        max_tokens=300,
+        model_name=GROQ_STRUCTURED_MODEL
     )
 
     if not content:
@@ -1454,13 +1486,13 @@ async def apply_stats(
     player = await get_player(user_id)
 
     if not player:
-        # На всякий случай автоматически регистрируем.
-        await register_player(
-            user_id,
-            username
+        # Регистрация только через /start. Посты сами по себе
+        # не должны регистрировать человека в игре.
+        logger.info(
+            "Сообщение от незарегистрированного пользователя %s пропущено.",
+            user_id
         )
-
-        player = await get_player(user_id)
+        return
 
     await update_username(
         user_id,
@@ -1683,7 +1715,14 @@ async def handle_message(message: Message):
 
     user = message.from_user
 
-    if not user:
+    if not user or user.is_bot:
+        return
+
+    if not await mark_message_processed(message):
+        logger.info(
+            "Повторное сообщение пропущено: chat=%s message=%s",
+            message.chat.id, message.message_id
+        )
         return
 
     username = normalize_username(
@@ -1700,14 +1739,15 @@ async def handle_message(message: Message):
     # --------------------------------------------------------
 
     if topic_id == PROFILES_TOPIC_ID:
-        # Сохраняем анкету только если игрок уже зарегистрирован.
+        # Анкета сохраняется только для зарегистрированного игрока.
         player = await get_player(user.id)
 
         if not player:
-            await register_player(
+            await bot.send_message(
                 user.id,
-                username
+                "Анкета не найдена. Сначала зарегистрируйся командой /start."
             )
+            return
 
         url = build_message_link(
             message
@@ -1985,6 +2025,42 @@ async def news_loop():
                 "Ошибка в news_loop."
             )
 
+            await asyncio.sleep(60)
+
+
+# ============================================================
+# WEEKLY RESET LOOP
+# ============================================================
+
+async def weekly_reset_loop():
+    """Фоновая страховка: недельные лимиты сбрасываются даже без нового поста."""
+    while True:
+        try:
+            await asyncio.sleep(60 * 60)
+            cutoff = now_utc() - timedelta(days=7)
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    """
+                    UPDATE players
+                    SET
+                        str_week_limit = 0,
+                        rep_week_limit = 0,
+                        con_week_limit = 0,
+                        money_week_limit = 0,
+                        week_reset = ?
+                    WHERE week_reset IS NULL OR week_reset < ?
+                    """,
+                    (dt_to_str(now_utc()), dt_to_str(cutoff))
+                )
+                await db.commit()
+
+            logger.info("Проверка недельных лимитов выполнена.")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ошибка weekly_reset_loop.")
             await asyncio.sleep(60)
 
 
@@ -2369,13 +2445,21 @@ async def startup_checks():
     )
 
     logger.info(
-        "Темы: игра=%s, полурол=%s, анкеты=%s, "
-        "флуд=%s, повествование=%s",
+        "Темы: игра=%s, полурол=%s, инфо=%s, админка=%s, "
+        "анкеты=%s, флуд=%s, повествование=%s",
         GAME_TOPIC_ID,
         SEMI_RP_TOPIC_ID,
+        INFO_TOPIC_ID,
+        ADMIN_TOPIC_ID,
         PROFILES_TOPIC_ID,
         FLOOD_TOPIC_ID,
         STORY_TOPIC_ID
+    )
+
+    logger.info(
+        "Groq models: news=%s, structured=%s",
+        GROQ_MODEL,
+        GROQ_STRUCTURED_MODEL
     )
 
     try:
@@ -2405,11 +2489,14 @@ async def main():
 
     await startup_checks()
 
-    if not groq_available:
+    if not groq_news_available:
         logger.warning(
-            "⚠️ Groq недоступен. "
-            "Бот продолжит работать, но "
-            "ИИ-анализ и новости будут временно отключены."
+            "⚠️ Модель новостей Groq недоступна. Новости отключены."
+        )
+
+    if not groq_structured_available:
+        logger.warning(
+            "⚠️ Структурированная модель Groq недоступна. Анализ статов и событий отключён."
         )
 
     asyncio.create_task(
@@ -2418,6 +2505,10 @@ async def main():
 
     asyncio.create_task(
         inactivity_loop()
+    )
+
+    asyncio.create_task(
+        weekly_reset_loop()
     )
 
     asyncio.create_task(
