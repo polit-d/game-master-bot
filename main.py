@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+from aiohttp import web
 import asyncpg
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -1826,7 +1827,34 @@ async def publish_top():
 # ============================================================
 # ЗАПУСК
 # ============================================================
+async def health_handler(request):
+    return web.Response(text="Bot is alive")
 
+
+async def start_web_server():
+    app = web.Application()
+
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.getenv("PORT", "10000"))
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port
+    )
+
+    await site.start()
+
+    logger.info(
+        "HTTP-сервер для Render запущен на порту %s",
+        port
+    )
+    
 async def main():
     logger.info("Запуск бота...")
 
@@ -1835,6 +1863,8 @@ async def main():
     try:
         await init_database()
 
+        await start_web_server()
+        
         logger.info(
             "Бот подключён к группе %s.",
             GROUP_ID_INT
