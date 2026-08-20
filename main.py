@@ -1,99 +1,52 @@
 import os
-import re
-import json
-import random
 import asyncio
+import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
-import aiosqlite
-from dotenv import load_dotenv
-
-from aiogram import Bot, Dispatcher
-from aiogram.filters import Command, CommandObject
+import asyncpg
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from aiogram.types import Message
+from dotenv import load_dotenv
 
 
 # ============================================================
-# НАСТРОЙКИ
+# НАСТРОЙКА
 # ============================================================
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROUP_ID = os.getenv("GROUP_ID")
 
-GROUP_ID = int(os.getenv("GROUP_ID", "-1004299403919"))
+GAME_TOPIC_ID = os.getenv("GAME_TOPIC_ID")
+SEMI_RP_TOPIC_ID = os.getenv("SEMI_RP_TOPIC_ID")
+INFO_TOPIC_ID = os.getenv("INFO_TOPIC_ID")
+ADMIN_TOPIC_ID = os.getenv("ADMIN_TOPIC_ID")
+PROFILES_TOPIC_ID = os.getenv("PROFILES_TOPIC_ID")
+FLOOD_TOPIC_ID = os.getenv("FLOOD_TOPIC_ID")
+STORY_TOPIC_ID = os.getenv("STORY_TOPIC_ID")
 
-# ID тем
-GAME_TOPIC_ID = int(os.getenv("GAME_TOPIC_ID", "5"))
-SEMI_RP_TOPIC_ID = int(os.getenv("SEMI_RP_TOPIC_ID", "33"))
-INFO_TOPIC_ID = int(os.getenv("INFO_TOPIC_ID", "20"))
-ADMIN_TOPIC_ID = int(os.getenv("ADMIN_TOPIC_ID", "38"))
-PROFILES_TOPIC_ID = int(os.getenv("PROFILES_TOPIC_ID", "2"))
-FLOOD_TOPIC_ID = int(os.getenv("FLOOD_TOPIC_ID", "4"))
-STORY_TOPIC_ID = int(os.getenv("STORY_TOPIC_ID", "32"))
+RULES_URL = os.getenv("RULES_URL")
 
-RULES_URL = os.getenv("RULES_URL", "").strip()
-
-# ID администраторов Telegram через запятую:
-# ADMIN_IDS=123456789,987654321
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = {
     int(x.strip())
-    for x in os.getenv("ADMIN_IDS", "").split(",")
+    for x in ADMIN_IDS_RAW.split(",")
     if x.strip().isdigit()
 }
 
-# База
-DB_PATH = os.getenv("DB_PATH", "stats.db")
-
-# ИИ
-GROQ_MODEL = os.getenv(
-    "GROQ_MODEL",
-    "llama-3.3-70b-versatile"
-)
-
-# Модель для строгого JSON. Groq поддерживает strict json_schema
-# на моделях GPT-OSS, поэтому JSON-анализ не смешиваем с моделью новостей.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_STRUCTURED_MODEL = os.getenv(
     "GROQ_STRUCTURED_MODEL",
     "openai/gpt-oss-20b"
 )
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-# Для статов
-MIN_STAT_CHARS = 300
-
-# Для событий новостей.
-# Можно оставить 80: короткие сообщения флуд не будут превращаться
-# в сотни бессмысленных событий.
-MIN_NEWS_CHARS = 80
-
-# Новости каждые 12 часов
-NEWS_INTERVAL_HOURS = 12
-
-# Неактивность
-INACTIVITY_DAYS = 30
-
-# Статы после возвращения из "Читателя"
-INACTIVE_STR = 1
-INACTIVE_REP = 1
-INACTIVE_CON = 1
-INACTIVE_MONEY = 100
-
-# Начальные статы при регистрации
-START_STR = 4
-START_REP = 4
-START_CON = 4
-START_MONEY = 500
-
-# Недельные максимумы начисления
-WEEKLY_STR_LIMIT = 2
-WEEKLY_REP_LIMIT = 7
-WEEKLY_CON_LIMIT = 8
-WEEKLY_MONEY_LIMIT = 1000
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 # ============================================================
@@ -102,78 +55,114 @@ WEEKLY_MONEY_LIMIT = 1000
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("rpg_bot")
 
 
 # ============================================================
-# TELEGRAM
+# ПРОВЕРКА НАСТРОЕК
 # ============================================================
 
-if not BOT_TOKEN:
+REQUIRED_ENV = {
+    "BOT_TOKEN": BOT_TOKEN,
+    "GROUP_ID": GROUP_ID,
+    "GAME_TOPIC_ID": GAME_TOPIC_ID,
+    "SEMI_RP_TOPIC_ID": SEMI_RP_TOPIC_ID,
+    "INFO_TOPIC_ID": INFO_TOPIC_ID,
+    "ADMIN_TOPIC_ID": ADMIN_TOPIC_ID,
+    "PROFILES_TOPIC_ID": PROFILES_TOPIC_ID,
+    "FLOOD_TOPIC_ID": FLOOD_TOPIC_ID,
+    "STORY_TOPIC_ID": STORY_TOPIC_ID,
+    "RULES_URL": RULES_URL,
+    "GROQ_API_KEY": GROQ_API_KEY,
+    "DATABASE_URL": DATABASE_URL,
+}
+
+missing_env = [
+    name for name, value in REQUIRED_ENV.items()
+    if not value
+]
+
+if missing_env:
     raise RuntimeError(
-        "BOT_TOKEN не найден. Добавь BOT_TOKEN в Environment Variables Render."
+        "Не хватает переменных окружения: "
+        + ", ".join(missing_env)
     )
+
+
+try:
+    GROUP_ID_INT = int(GROUP_ID)
+
+    GAME_TOPIC_ID_INT = int(GAME_TOPIC_ID)
+    SEMI_RP_TOPIC_ID_INT = int(SEMI_RP_TOPIC_ID)
+    INFO_TOPIC_ID_INT = int(INFO_TOPIC_ID)
+    ADMIN_TOPIC_ID_INT = int(ADMIN_TOPIC_ID)
+    PROFILES_TOPIC_ID_INT = int(PROFILES_TOPIC_ID)
+    FLOOD_TOPIC_ID_INT = int(FLOOD_TOPIC_ID)
+    STORY_TOPIC_ID_INT = int(STORY_TOPIC_ID)
+
+except ValueError as exc:
+    raise RuntimeError(
+        "GROUP_ID и ID тем должны быть числами."
+    ) from exc
+
+
+# ============================================================
+# БОТ
+# ============================================================
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
 # ============================================================
-# TOPIC SETS
+# ГЛОБАЛЬНЫЕ ОБЪЕКТЫ
 # ============================================================
 
-STAT_TOPIC_IDS = {
-    GAME_TOPIC_ID,
-    SEMI_RP_TOPIC_ID,
-}
+db_pool = None
 
-NEWS_TOPIC_IDS = {
-    GAME_TOPIC_ID,
-    SEMI_RP_TOPIC_ID,
-    FLOOD_TOPIC_ID,
-}
+# Последние сообщения для будущей генерации новостей.
+# Храним только ограниченное количество в памяти.
+event_buffer = []
 
-IGNORED_TOPIC_IDS = {
-    INFO_TOPIC_ID,
-    ADMIN_TOPIC_ID,
-    STORY_TOPIC_ID,
-}
+event_buffer_lock = asyncio.Lock()
+
+MAX_EVENT_BUFFER = 100
+
+MIN_TEXT_FOR_STATS = 300
+
+NEWS_INTERVAL_HOURS = 12
+
+INACTIVITY_DAYS = 30
+
+WEEK_DAYS = 7
 
 
 # ============================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
-def now_utc() -> datetime:
+def now_utc():
     return datetime.now(timezone.utc)
 
 
-def dt_to_str(value: datetime | None) -> str | None:
+def normalize_datetime(value):
+    """
+    PostgreSQL может вернуть datetime с timezone.
+    Приводим всё к timezone-aware UTC.
+    """
     if value is None:
         return None
-    return value.astimezone(timezone.utc).isoformat()
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
 
 
-def str_to_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
-
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def normalize_username(username: str | None) -> str:
-    if not username:
-        return ""
-    return username.lstrip("@").strip().lower()
-
-
-def get_level_status(value: int):
+def get_level_status(value):
     if value <= 3:
         return 1, "Новичок"
     elif value <= 7:
@@ -186,7 +175,7 @@ def get_level_status(value: int):
         return 5, "Топ города"
 
 
-def get_badge(bad_count: int, good_count: int):
+def get_badge(bad_count, good_count):
     if bad_count > good_count + 5:
         return "Bad boy"
 
@@ -196,454 +185,953 @@ def get_badge(bad_count: int, good_count: int):
     return ""
 
 
-def is_admin(user_id: int) -> bool:
+def get_topic_name(topic_id):
+    if topic_id == GAME_TOPIC_ID_INT:
+        return "Игровая"
+
+    if topic_id == SEMI_RP_TOPIC_ID_INT:
+        return "Полурол - на обочине"
+
+    if topic_id == INFO_TOPIC_ID_INT:
+        return "О чем это вообще"
+
+    if topic_id == ADMIN_TOPIC_ID_INT:
+        return "Админка"
+
+    if topic_id == PROFILES_TOPIC_ID_INT:
+        return "Анкеты"
+
+    if topic_id == FLOOD_TOPIC_ID_INT:
+        return "Флуд"
+
+    if topic_id == STORY_TOPIC_ID_INT:
+        return "Повествование"
+
+    return "Неизвестная тема"
+
+
+def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
-def topic_name(topic_id: int | None) -> str:
-    names = {
-        GAME_TOPIC_ID: "Игровая",
-        SEMI_RP_TOPIC_ID: "Полурол — на обочине",
-        INFO_TOPIC_ID: "О чем это вообще",
-        ADMIN_TOPIC_ID: "Админка",
-        PROFILES_TOPIC_ID: "Анкеты",
-        FLOOD_TOPIC_ID: "Флуд",
-        STORY_TOPIC_ID: "Повествование",
+def get_topic_id(message: Message):
+    return message.message_thread_id
+
+
+def is_stats_topic(message: Message):
+    return get_topic_id(message) in {
+        GAME_TOPIC_ID_INT,
+        SEMI_RP_TOPIC_ID_INT,
     }
 
-    return names.get(topic_id, "Неизвестная тема")
+
+def is_news_topic_source(message: Message):
+    return get_topic_id(message) in {
+        GAME_TOPIC_ID_INT,
+        SEMI_RP_TOPIC_ID_INT,
+        FLOOD_TOPIC_ID_INT,
+        PROFILES_TOPIC_ID_INT,
+    }
 
 
-def build_message_link(message: Message) -> str | None:
-    """
-    Формирует ссылку на сообщение группы.
+def is_ignored_topic(message: Message):
+    return get_topic_id(message) in {
+        INFO_TOPIC_ID_INT,
+        ADMIN_TOPIC_ID_INT,
+        STORY_TOPIC_ID_INT,
+    }
 
-    Для приватной супергруппы Telegram обычно использует:
-    https://t.me/c/<internal_id>/<message_id>
 
-    У нас GROUP_ID = -1004299403919,
-    поэтому internal_id = 4299403919.
-    """
-
-    if not message.message_id:
+def clean_username(username):
+    if not username:
         return None
 
-    if GROUP_ID < 0:
-        internal_id = str(GROUP_ID).replace("-100", "", 1)
+    return username.lstrip("@").strip()
 
-        if internal_id.isdigit():
-            return (
-                f"https://t.me/c/"
-                f"{internal_id}/"
-                f"{message.message_id}"
-            )
 
-    username = getattr(message.chat, "username", None)
+def make_profile_link(username):
+    username = clean_username(username)
 
-    if username:
-        return (
-            f"https://t.me/{username}/"
-            f"{message.message_id}"
-        )
+    if not username:
+        return None
 
-    return None
+    return f"https://t.me/{username}"
 
 
 # ============================================================
 # DATABASE
 # ============================================================
 
-CREATE_PLAYERS_TABLE = """
-CREATE TABLE IF NOT EXISTS players (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    str INTEGER DEFAULT 2,
-    rep INTEGER DEFAULT 2,
-    con INTEGER DEFAULT 2,
-    money INTEGER DEFAULT 300,
-    last_post TEXT,
-    anketa_url TEXT,
-    status TEXT DEFAULT 'Игрок',
-    bad_boy_count INTEGER DEFAULT 0,
-    good_boy_count INTEGER DEFAULT 0,
+async def create_database_pool():
+    global db_pool
 
-    str_week_limit INTEGER DEFAULT 0,
-    rep_week_limit INTEGER DEFAULT 0,
-    con_week_limit INTEGER DEFAULT 0,
-    money_week_limit INTEGER DEFAULT 0,
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        command_timeout=30,
+    )
 
-    week_reset TEXT,
-    registered_at TEXT,
-    first_intro_sent INTEGER DEFAULT 0
-);
-"""
-
-CREATE_ACTIONS_TABLE = """
-CREATE TABLE IF NOT EXISTS actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    action_type TEXT,
-    action_value INTEGER,
-    timestamp TEXT
-);
-"""
-
-CREATE_PROCESSED_MESSAGES_TABLE = """
-CREATE TABLE IF NOT EXISTS processed_messages (
-    chat_id INTEGER NOT NULL,
-    message_id INTEGER NOT NULL,
-    processed_at TEXT NOT NULL,
-    PRIMARY KEY (chat_id, message_id)
-);
-"""
+    logger.info("Подключение к PostgreSQL установлено.")
 
 
-CREATE_EVENTS_TABLE = """
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    username TEXT,
-    event_type TEXT,
-    summary TEXT,
-    source_topic INTEGER,
-    source_message_id INTEGER,
-    source_url TEXT,
-    created_at TEXT,
-    published INTEGER DEFAULT 0
-);
-"""
+async def close_database_pool():
+    global db_pool
+
+    if db_pool:
+        await db_pool.close()
+        logger.info("Соединение с PostgreSQL закрыто.")
 
 
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(CREATE_PLAYERS_TABLE)
-        await db.execute(CREATE_ACTIONS_TABLE)
-        await db.execute(CREATE_EVENTS_TABLE)
-        await db.execute(CREATE_PROCESSED_MESSAGES_TABLE)
+async def init_database():
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS players (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            str INTEGER NOT NULL DEFAULT 1,
+            rep INTEGER NOT NULL DEFAULT 1,
+            con INTEGER NOT NULL DEFAULT 1,
+            money INTEGER NOT NULL DEFAULT 100,
 
-        await db.commit()
+            last_post TIMESTAMPTZ,
 
-    logger.info("База данных готова.")
+            anketa_url TEXT,
 
+            status TEXT NOT NULL DEFAULT 'Игрок',
 
-# ============================================================
-# DATABASE HELPERS
-# ============================================================
+            bad_boy_count INTEGER NOT NULL DEFAULT 0,
+            good_boy_count INTEGER NOT NULL DEFAULT 0,
 
-async def get_player(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT * FROM players WHERE user_id = ?",
-            (user_id,)
+            str_week_limit INTEGER NOT NULL DEFAULT 0,
+            rep_week_limit INTEGER NOT NULL DEFAULT 0,
+            con_week_limit INTEGER NOT NULL DEFAULT 0,
+            money_week_limit INTEGER NOT NULL DEFAULT 0,
+
+            week_reset TIMESTAMPTZ,
+
+            first_start_seen BOOLEAN NOT NULL DEFAULT FALSE
         )
+        """
+    )
 
-        row = await cursor.fetchone()
-        await cursor.close()
-
-        return row
-
-
-async def get_player_by_username(username: str):
-    username = normalize_username(username)
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            """
-            SELECT * FROM players
-            WHERE LOWER(username) = ?
-            """,
-            (username,)
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS actions (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT,
+            action_type TEXT,
+            action_value INTEGER,
+            timestamp TIMESTAMPTZ,
+            telegram_message_id BIGINT UNIQUE,
+            topic_id INTEGER
         )
+        """
+    )
 
-        row = await cursor.fetchone()
-        await cursor.close()
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_messages (
+            message_id BIGINT PRIMARY KEY,
+            processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
 
-        return row
+    logger.info("Таблицы PostgreSQL проверены/созданы.")
+
+
+async def get_player(user_id):
+    return await db_pool.fetchrow(
+        """
+        SELECT *
+        FROM players
+        WHERE user_id = $1
+        """,
+        user_id
+    )
+
+
+async def get_player_by_username(username):
+    username = clean_username(username)
+
+    if not username:
+        return None
+
+    return await db_pool.fetchrow(
+        """
+        SELECT *
+        FROM players
+        WHERE LOWER(username) = LOWER($1)
+        """,
+        username
+    )
 
 
 async def register_player(
-    user_id: int,
-    username: str
+    user_id,
+    username,
+    initial_stats=True
 ):
     existing = await get_player(user_id)
 
     if existing:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
+        return existing, False
+
+    if initial_stats:
+        initial_str = 4
+        initial_rep = 4
+        initial_con = 4
+        initial_money = 500
+    else:
+        initial_str = 1
+        initial_rep = 1
+        initial_con = 1
+        initial_money = 100
+
+    player = await db_pool.fetchrow(
+        """
+        INSERT INTO players (
+            user_id,
+            username,
+            str,
+            rep,
+            con,
+            money,
+            last_post,
+            status,
+            week_reset,
+            first_start_seen
+        )
+        VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            'Игрок',
+            $7,
+            FALSE
+        )
+        RETURNING *
+        """,
+        user_id,
+        clean_username(username),
+        initial_str,
+        initial_rep,
+        initial_con,
+        initial_money,
+        now_utc()
+    )
+
+    return player, True
+
+
+async def ensure_registered(user_id, username):
+    player = await get_player(user_id)
+
+    if player:
+        # Обновляем username, если он изменился.
+        current_username = clean_username(username)
+
+        if current_username and current_username != player["username"]:
+            player = await db_pool.fetchrow(
                 """
                 UPDATE players
-                SET username = ?
-                WHERE user_id = ?
+                SET username = $1
+                WHERE user_id = $2
+                RETURNING *
                 """,
-                (normalize_username(username), user_id)
+                current_username,
+                user_id
             )
 
-            await db.commit()
+        return player, False
 
-        return False
-
-    current = dt_to_str(now_utc())
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO players (
-                user_id,
-                username,
-                str,
-                rep,
-                con,
-                money,
-                last_post,
-                status,
-                week_reset,
-                registered_at,
-                first_intro_sent
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'Игрок', ?, ?, 1)
-            """,
-            (
-                user_id,
-                normalize_username(username),
-                START_STR,
-                START_REP,
-                START_CON,
-                START_MONEY,
-                current,
-                current,
-                current
-            )
-        )
-
-        await db.commit()
-
-    return True
+    return await register_player(
+        user_id,
+        username,
+        initial_stats=True
+    )
 
 
-async def update_username(user_id: int, username: str):
-    username = normalize_username(username)
+# ============================================================
+# ОБРАБОТКА НЕДЕЛЬНЫХ ЛИМИТОВ
+# ============================================================
 
-    if not username:
-        return
+async def reset_week_if_needed(player):
+    week_reset = normalize_datetime(player["week_reset"])
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+    if not week_reset:
+        await db_pool.execute(
             """
             UPDATE players
-            SET username = ?
-            WHERE user_id = ?
+            SET week_reset = $1
+            WHERE user_id = $2
             """,
-            (username, user_id)
+            now_utc(),
+            player["user_id"]
+        )
+        return await get_player(player["user_id"])
+
+    if now_utc() - week_reset >= timedelta(days=WEEK_DAYS):
+        player = await db_pool.fetchrow(
+            """
+            UPDATE players
+            SET
+                str_week_limit = 0,
+                rep_week_limit = 0,
+                con_week_limit = 0,
+                money_week_limit = 0,
+                week_reset = $1
+            WHERE user_id = $2
+            RETURNING *
+            """,
+            now_utc(),
+            player["user_id"]
         )
 
-        await db.commit()
-
-
-async def mark_message_processed(message: Message) -> bool:
-    """Возвращает True, если сообщение ещё не обрабатывалось."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        try:
-            await db.execute(
-                """
-                INSERT INTO processed_messages (chat_id, message_id, processed_at)
-                VALUES (?, ?, ?)
-                """,
-                (message.chat.id, message.message_id, dt_to_str(now_utc()))
-            )
-            await db.commit()
-            return True
-        except aiosqlite.IntegrityError:
-            return False
+    return player
 
 
 # ============================================================
-# PROFILE
+# GROQ
 # ============================================================
 
-async def show_profile(message: Message, player):
-    user_id = player[0]
-    username = player[1] or "без_username"
+async def groq_request(
+    messages,
+    model=None,
+    temperature=0.4
+):
+    model = model or GROQ_MODEL
 
-    str_val = player[2]
-    rep_val = player[3]
-    con_val = player[4]
-    money_val = player[5]
+    url = "https://api.groq.com/openai/v1/chat/completions"
 
-    last_post = player[6]
-    anketa_url = player[7]
-    status = player[8]
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    bad_count = player[9]
-    good_count = player[10]
+    data = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+    }
 
-    str_level, str_status = get_level_status(str_val)
-    rep_level, rep_status = get_level_status(rep_val)
-    con_level, con_status = get_level_status(con_val)
+    timeout = aiohttp.ClientTimeout(total=60)
 
-    badge = get_badge(
-        bad_count,
-        good_count
-    )
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
 
-    if anketa_url:
-        anketa_text = f"[Открыть анкету]({anketa_url})"
-    else:
-        anketa_text = "Не заполнена"
+            async with session.post(
+                url,
+                headers=headers,
+                json=data
+            ) as response:
 
-    text = (
-        "📋 *ПРОФИЛЬ ИГРОКА*\n\n"
+                response_text = await response.text()
 
-        f"👤 Имя: @{username}\n"
-        f"📝 Анкета: {anketa_text}\n\n"
+                if response.status != 200:
+                    logger.error(
+                        "Groq API error %s: %s",
+                        response.status,
+                        response_text[:1000]
+                    )
+                    return None
 
-        f"💪 *Сила (STR):* {str_val} "
-        f"(ур. {str_level}, {str_status})\n"
+                try:
+                    return json.loads(response_text)
+                except json.JSONDecodeError:
+                    logger.error(
+                        "Groq вернул некорректный JSON ответа API: %s",
+                        response_text[:1000]
+                    )
+                    return None
 
-        f"🌟 *Репутация (REP):* {rep_val} "
-        f"(ур. {rep_level}, {rep_status})\n"
+    except asyncio.TimeoutError:
+        logger.error("Groq API timeout.")
+        return None
 
-        f"🤝 *Связи (CON):* {con_val} "
-        f"(ур. {con_level}, {con_status})\n"
+    except aiohttp.ClientError as exc:
+        logger.error("Ошибка соединения с Groq: %s", exc)
+        return None
 
-        f"💰 *Кэш:* {money_val} монет\n\n"
+    except Exception:
+        logger.exception("Неожиданная ошибка Groq.")
+        return None
 
-        f"🎯 Статус: {status}\n"
-        f"🏷 Пометка: {badge or 'Нет'}\n\n"
 
-        f"📅 Последняя активность: "
-        f"{last_post or 'Никогда'}"
-    )
+def extract_json_object(text):
+    """
+    Пытаемся достать JSON даже если модель обернула его
+    в ```json ... ```.
+    """
 
-    await message.answer(
+    if not text:
+        return None
+
+    text = text.strip()
+
+    # Убираем markdown code fence.
+    text = re.sub(
+        r"^```(?:json)?\s*",
+        "",
         text,
-        parse_mode="Markdown"
+        flags=re.IGNORECASE
     )
 
+    text = re.sub(
+        r"\s*```$",
+        "",
+        text
+    )
 
-# ============================================================
-# START
-# ============================================================
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
 
-WELCOME_TEXT = """
-🎭 *Добро пожаловать в игру!*
+    # Ищем первый объект JSON внутри текста.
+    match = re.search(
+        r"\{.*\}",
+        text,
+        flags=re.DOTALL
+    )
 
-Ты зарегистрирован в игровой системе.
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
 
-Твои начальные характеристики:
+    return None
 
-💪 STR — 4
-🌟 REP — 4
-🤝 CON — 4
-💰 MONEY — 500
 
-━━━━━━━━━━━━━━
+def safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
-📋 *Основные команды*
 
-/profile — посмотреть свой профиль
+async def analyze_text(text):
+    prompt = f"""
+Ты аналитик текстовой ролевой игры.
 
-/profile @username — посмотреть профиль другого игрока
+Проанализируй сообщение игрока.
 
-/setanket ССЫЛКА — добавить ссылку на свою анкету
+ВАЖНО:
+- Не придумывай действия, которых в тексте нет.
+- Если категория не подходит, ставь 0.
+- Значения должны быть целыми числами.
+- Не начисляй огромные значения за одно сообщение.
+- Максимально разумные значения за один текст:
+  STR: 0-2
+  REP: 0-2
+  CON: 0-2
+  MONEY: 0-10
 
-/random str @username — случайный исход столкновения по STR
+Категории:
 
-/random rep @username — по REP
+STR:
+- драки;
+- победы в драках;
+- спорт;
+- физические действия;
+- силовые действия.
 
-/random con @username — по CON
+REP:
+- помощь другим;
+- заметные события;
+- красивые и значимые посты;
+- участие в мероприятиях;
+- администрирование;
+- конфликты, влияющие на репутацию.
 
-/random money @username — по MONEY
+CON:
+- знакомства;
+- общение;
+- сделки;
+- договорённости;
+- сюжетные связи.
 
-/rules — правила игры
+MONEY:
+- сделки;
+- заработок;
+- задания;
+- получение денег.
 
-/help — инструкция
+bad_boy:
+Поставь 1, если сообщение явно показывает криминальное,
+жестокое, агрессивное или крайне плохое поведение персонажа.
 
-━━━━━━━━━━━━━━
+good_boy:
+Поставь 1, если сообщение явно показывает помощь,
+доброе или социально полезное поведение персонажа.
 
-🎮 *Как начинают считаться статы*
+Верни ТОЛЬКО JSON:
 
-После регистрации бот следит за игровыми постами в темах:
+{{
+  "str": 0,
+  "rep": 0,
+  "con": 0,
+  "money": 0,
+  "bad_boy": 0,
+  "good_boy": 0
+}}
 
-🎭 «Игровая»
-🛣 «Полурол — на обочине»
+Сообщение:
 
-Для начисления характеристик ИИ анализирует только сообщения от *300 символов*.
-
-Флуд статы не начисляет, но отдельные события из него могут попасть в городские новости.
-
-━━━━━━━━━━━━━━
-
-📰 *Новости*
-
-Бот собирает игровые события, события из полурола и флуд-события.
-
-Периодически ИИ объединяет их в городскую хронику и публикует её в теме «Повествование».
-
-📋 Новые анкеты также могут становиться событиями для новостей.
-
-━━━━━━━━━━━━━━
-
-📜 Правила:
-
-{rules}
+{text}
 """
 
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты аналитик текстовой ролевой игры. "
+                "Отвечай только JSON."
+            )
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
 
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    user = message.from_user
+    result = await groq_request(
+        messages,
+        model=GROQ_STRUCTURED_MODEL,
+        temperature=0.1
+    )
 
-    if not user:
+    if not result:
+        return {
+            "str": 0,
+            "rep": 0,
+            "con": 0,
+            "money": 0,
+            "bad_boy": 0,
+            "good_boy": 0,
+        }
+
+    try:
+        content = result["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        logger.error("Не удалось получить content из ответа Groq.")
+        return {
+            "str": 0,
+            "rep": 0,
+            "con": 0,
+            "money": 0,
+            "bad_boy": 0,
+            "good_boy": 0,
+        }
+
+    parsed = extract_json_object(content)
+
+    if not isinstance(parsed, dict):
+        logger.error(
+            "Groq вернул JSON, который не является объектом: %s",
+            content[:1000]
+        )
+
+        return {
+            "str": 0,
+            "rep": 0,
+            "con": 0,
+            "money": 0,
+            "bad_boy": 0,
+            "good_boy": 0,
+        }
+
+    return {
+        "str": max(0, min(2, safe_int(parsed.get("str")))),
+        "rep": max(0, min(2, safe_int(parsed.get("rep")))),
+        "con": max(0, min(2, safe_int(parsed.get("con")))),
+        "money": max(0, min(10, safe_int(parsed.get("money")))),
+        "bad_boy": max(
+            0,
+            min(1, safe_int(parsed.get("bad_boy")))
+        ),
+        "good_boy": max(
+            0,
+            min(1, safe_int(parsed.get("good_boy")))
+        ),
+    }
+
+
+# ============================================================
+# НОВОСТИ
+# ============================================================
+
+async def add_event_to_buffer(
+    message,
+    event_type,
+    text,
+    username=None,
+    anketa_url=None
+):
+    if not text:
         return
 
-    username = normalize_username(user.username)
+    event = {
+        "type": event_type,
+        "username": clean_username(username),
+        "text": text[:2000],
+        "anketa_url": anketa_url,
+        "topic": get_topic_name(get_topic_id(message)),
+        "timestamp": now_utc().isoformat(),
+    }
 
-    created = await register_player(
-        user.id,
+    async with event_buffer_lock:
+        event_buffer.append(event)
+
+        if len(event_buffer) > MAX_EVENT_BUFFER:
+            del event_buffer[
+                :len(event_buffer) - MAX_EVENT_BUFFER
+            ]
+
+
+async def generate_news_from_events():
+    async with event_buffer_lock:
+        if not event_buffer:
+            return None
+
+        events = list(event_buffer)
+
+        # Очищаем буфер после забора.
+        event_buffer.clear()
+
+    formatted_events = []
+
+    for event in events:
+        formatted_events.append(
+            f"""
+Тип: {event['type']}
+Игрок: @{event['username'] or 'без username'}
+Тема: {event['topic']}
+Текст: {event['text']}
+Анкета: {event['anketa_url'] or 'нет'}
+"""
+        )
+
+    source_text = "\n---\n".join(formatted_events)
+
+    prompt = f"""
+Ты нарративный ИИ криминальной хроники альтернативного современного города.
+
+Твоя задача — создать одну короткую новость для ролевой игры
+на основе РЕАЛЬНЫХ событий, которые прислали игроки.
+
+Не придумывай конкретные факты, которых нет в исходных сообщениях.
+
+Можно объединить несколько сообщений в одну городскую новость.
+
+Особенно обращай внимание на:
+- драки;
+- конфликты;
+- сделки;
+- новые знакомства;
+- странные события;
+- активность игроков;
+- флуд, если из него видно интересное событие;
+- появление новых персонажей.
+
+Если среди событий есть новая анкета, можно написать в стиле:
+"В городе появилась новая личность..."
+и обязательно использовать предоставленную ссылку на анкету.
+
+Стиль:
+- криминальная хроника;
+- альтернативная современность;
+- без магии;
+- атмосферно;
+- 2-4 предложения;
+- без выдумывания фактов.
+
+События:
+
+{source_text}
+"""
+
+    result = await groq_request(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Ты нарративный ИИ ролевой игры. "
+                    "Создавай короткие городские новости "
+                    "только на основе переданных событий."
+                )
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        model=GROQ_MODEL,
+        temperature=0.8
+    )
+
+    if not result:
+        return None
+
+    try:
+        return result["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError):
+        logger.error("Не удалось получить текст новости.")
+        return None
+
+
+async def generate_events_loop():
+    while True:
+        try:
+            await asyncio.sleep(
+                NEWS_INTERVAL_HOURS * 60 * 60
+            )
+
+            news = await generate_news_from_events()
+
+            if not news:
+                continue
+
+            await bot.send_message(
+                GROUP_ID_INT,
+                "📰 **НОВОСТИ ГОРОДА**\n\n" + news,
+                message_thread_id=STORY_TOPIC_ID_INT,
+                parse_mode="Markdown"
+            )
+
+            logger.info("Новость опубликована.")
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception:
+            logger.exception(
+                "Ошибка фоновой генерации новостей."
+            )
+
+
+# ============================================================
+# ОБРАБОТКА СТАТИСТИКИ
+# ============================================================
+
+async def update_stats(
+    user_id,
+    username,
+    text,
+    message_id,
+    topic_id
+):
+    if len(text) < MIN_TEXT_FOR_STATS:
+        logger.info(
+            "Сообщение %s слишком короткое для статов: %s символов.",
+            message_id,
+            len(text)
+        )
+        return
+
+    # Проверяем, не обрабатывали ли это сообщение раньше.
+    inserted = await db_pool.fetchval(
+        """
+        INSERT INTO processed_messages (
+            message_id
+        )
+        VALUES ($1)
+        ON CONFLICT (message_id)
+        DO NOTHING
+        RETURNING message_id
+        """,
+        message_id
+    )
+
+    if inserted is None:
+        logger.info(
+            "Сообщение %s уже обрабатывалось.",
+            message_id
+        )
+        return
+
+    player, created = await ensure_registered(
+        user_id,
         username
     )
 
     if created:
-        rules = RULES_URL or "Ссылка на правила пока не настроена."
+        logger.info(
+            "Игрок %s автоматически зарегистрирован.",
+            user_id
+        )
 
-        await message.answer(
-            WELCOME_TEXT.format(rules=rules),
-            parse_mode="Markdown"
+    player = await reset_week_if_needed(player)
+
+    result = await analyze_text(text)
+
+    str_remaining = max(
+        0,
+        2 - player["str_week_limit"]
+    )
+
+    rep_remaining = max(
+        0,
+        7 - player["rep_week_limit"]
+    )
+
+    con_remaining = max(
+        0,
+        8 - player["con_week_limit"]
+    )
+
+    money_remaining = max(
+        0,
+        1000 - player["money_week_limit"]
+    )
+
+    str_add = min(result["str"], str_remaining)
+    rep_add = min(result["rep"], rep_remaining)
+    con_add = min(result["con"], con_remaining)
+    money_add = min(result["money"], money_remaining)
+
+    await db_pool.execute(
+        """
+        UPDATE players
+        SET
+            str = str + $1,
+            rep = rep + $2,
+            con = con + $3,
+            money = money + $4,
+
+            last_post = $5,
+
+            bad_boy_count = bad_boy_count + $6,
+            good_boy_count = good_boy_count + $7,
+
+            str_week_limit = str_week_limit + $1,
+            rep_week_limit = rep_week_limit + $2,
+            con_week_limit = con_week_limit + $3,
+            money_week_limit = money_week_limit + $4,
+
+            status = CASE
+                WHEN status = 'Читатель'
+                THEN 'Игрок'
+                ELSE status
+            END
+        WHERE user_id = $8
+        """,
+        str_add,
+        rep_add,
+        con_add,
+        money_add,
+        now_utc(),
+        result["bad_boy"],
+        result["good_boy"],
+        user_id
+    )
+
+    await db_pool.execute(
+        """
+        INSERT INTO actions (
+            user_id,
+            action_type,
+            action_value,
+            timestamp,
+            telegram_message_id,
+            topic_id
+        )
+        VALUES
+            ($1, 'str', $2, $3, $4, $5),
+            ($1, 'rep', $6, $3, $4, $5),
+            ($1, 'con', $7, $3, $4, $5),
+            ($1, 'money', $8, $3, $4, $5)
+        ON CONFLICT (telegram_message_id)
+        DO NOTHING
+        """,
+        user_id,
+        str_add,
+        now_utc(),
+        message_id,
+        topic_id,
+        rep_add,
+        con_add,
+        money_add
+    )
+
+    logger.info(
+        "Статы обновлены для @%s: STR +%s, REP +%s, CON +%s, MONEY +%s",
+        username,
+        str_add,
+        rep_add,
+        con_add,
+        money_add
+    )
+
+
+# ============================================================
+# ПРОФИЛЬ
+# ============================================================
+
+async def build_profile_text(player):
+    str_level, str_status = get_level_status(
+        player["str"]
+    )
+
+    rep_level, rep_status = get_level_status(
+        player["rep"]
+    )
+
+    con_level, con_status = get_level_status(
+        player["con"]
+    )
+
+    badge = get_badge(
+        player["bad_boy_count"],
+        player["good_boy_count"]
+    )
+
+    if player["anketa_url"]:
+        anketa_text = (
+            f"[Открыть анкету]({player['anketa_url']})"
         )
     else:
-        await message.answer(
-            "Ты уже зарегистрирован в игре.\n\n"
-            "Используй /profile для просмотра профиля."
-        )
+        anketa_text = "Не заполнена"
+
+    last_post = player["last_post"]
+
+    if last_post:
+        last_post_text = normalize_datetime(
+            last_post
+        ).strftime("%d.%m.%Y %H:%M")
+    else:
+        last_post_text = "Никогда"
+
+    username = player["username"] or "без_username"
+
+    return f"""
+📋 *ПРОФИЛЬ ИГРОКА*
+
+👤 Имя: @{username}
+📝 Анкета: {anketa_text}
+
+💪 Сила (STR): {player["str"]} (ур. {str_level}, {str_status})
+🌟 Репутация (REP): {player["rep"]} (ур. {rep_level}, {rep_status})
+🤝 Связи (CON): {player["con"]} (ур. {con_level}, {con_status})
+💰 Кэш (MONEY): {player["money"]} монет
+
+🎯 Статус: {player["status"]}
+🏷 Пометка: {badge if badge else "Нет"}
+
+📅 Последний пост: {last_post_text}
+"""
 
 
-# ============================================================
-# HELP
-# ============================================================
-
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    rules = RULES_URL or "Ссылка на правила пока не настроена."
-
-    text = (
-        "🎭 *КОМАНДЫ ИГРЫ*\n\n"
-
-        "▶️ /start — регистрация\n"
-        "📋 /profile — свой профиль\n"
-        "📋 /profile @username — профиль игрока\n"
-        "📝 /setanket URL — добавить анкету\n"
-        "🎲 /random str @username — рандомайзер\n"
-        "🎲 /random rep @username — рандомайзер\n"
-        "🎲 /random con @username — рандомайзер\n"
-        "🎲 /random money @username — рандомайзер\n"
-        "📜 /rules — правила\n\n"
-
-        f"📜 Правила: {rules}\n\n"
-
-        "Для начисления статов учитываются игровые "
-        "посты от 300 символов в темах «Игровая» "
-        "и «Полурол — на обочине»."
-    )
+async def show_profile(message, player):
+    text = await build_profile_text(player)
 
     await message.answer(
         text,
@@ -652,97 +1140,103 @@ async def cmd_help(message: Message):
 
 
 # ============================================================
-# RULES
+# /START
 # ============================================================
 
-@dp.message(Command("rules"))
-async def cmd_rules(message: Message):
-    if RULES_URL:
-        await message.answer(
-            f"📜 *Правила игры*\n\n{RULES_URL}",
-            parse_mode="Markdown"
-        )
-    else:
-        await message.answer(
-            "📜 Ссылка на правила пока не настроена администратором."
-        )
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    user_id = message.from_user.id
+    username = message.from_user.username
 
+    player = await get_player(user_id)
 
-# ============================================================
-# SET ANKET
-# ============================================================
-
-@dp.message(Command("setanket"))
-async def cmd_setanket(
-    message: Message,
-    command: CommandObject
-):
-    user = message.from_user
-
-    if not user:
-        return
-
-    player = await get_player(user.id)
+    newly_registered = False
 
     if not player:
-        await message.answer(
-            "Анкета не найдена.\n\n"
-            "Сначала зарегистрируйся командой /start."
+        player, newly_registered = await register_player(
+            user_id,
+            username,
+            initial_stats=True
         )
-        return
 
-    args = (command.args or "").strip()
-
-    url_match = re.search(
-        r"https?://\S+",
-        args
+    await db_pool.execute(
+        """
+        UPDATE players
+        SET
+            username = $1,
+            first_start_seen = TRUE
+        WHERE user_id = $2
+        """,
+        clean_username(username),
+        user_id
     )
 
-    if not url_match:
-        await message.answer(
-            "Анкета не найдена.\n\n"
-            "Укажи ссылку на анкету:\n"
-            "/setanket https://t.me/..."
-        )
-        return
+    registration_text = ""
 
-    url = url_match.group(0).rstrip(").,!?")
+    if newly_registered:
+        registration_text = """
+🎉 Ты зарегистрирован в игре!
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            UPDATE players
-            SET anketa_url = ?
-            WHERE user_id = ?
-            """,
-            (url, user.id)
-        )
+Твои стартовые характеристики:
 
-        await db.commit()
+💪 STR: 4
+🌟 REP: 4
+🤝 CON: 4
+💰 MONEY: 500
+"""
+
+    rules_text = RULES_URL
 
     await message.answer(
-        "✅ Анкета добавлена в профиль!"
+        f"""
+👋 *Добро пожаловать в город!*
+
+Я бот статистики текстовой ролевой игры.
+
+{registration_text}
+
+Теперь твои игровые сообщения могут влиять на статистику.
+
+📋 *Основные команды:*
+
+/start — регистрация и инструкция
+/profile — посмотреть свой профиль
+/profile @username — посмотреть профиль игрока
+/setanket ССЫЛКА — добавить анкету
+/random str @username — случайное противостояние по STR
+/random rep @username — по REP
+/random con @username — по CON
+/random money @username — по MONEY
+
+📝 Для начисления статов бот анализирует сообщения
+длиной от *300 символов* в игровых темах.
+
+📚 *Правила игры:*
+{rules_text}
+
+💡 После регистрации можешь сразу открыть:
+`/profile`
+
+Чтобы добавить анкету:
+`/setanket https://t.me/...`
+
+Приятной игры!
+""",
+        parse_mode="Markdown"
     )
 
 
 # ============================================================
-# PROFILE
+# /PROFILE
 # ============================================================
 
 @dp.message(Command("profile"))
-async def cmd_profile(
-    message: Message,
-    command: CommandObject
-):
-    user = message.from_user
+async def cmd_profile(message: Message):
+    args = message.text.split()
 
-    if not user:
-        return
-
-    args = (command.args or "").strip()
-
-    if args:
-        username = args.split()[0].lstrip("@")
+    # /profile @username
+    if len(args) >= 2:
+        username = clean_username(args[1])
 
         player = await get_player_by_username(
             username
@@ -754,74 +1248,130 @@ async def cmd_profile(
             )
             return
 
-        await show_profile(
-            message,
-            player
-        )
+        await show_profile(message, player)
         return
 
-    player = await get_player(user.id)
+    user_id = message.from_user.id
+
+    player = await get_player(user_id)
 
     if not player:
         await message.answer(
-            "Ты ещё не зарегистрирован.\n\n"
-            "Используй /start."
+            "Вы ещё не зарегистрированы в игре.\n\n"
+            "Напишите /start для регистрации."
         )
         return
 
-    await show_profile(
+    await show_profile(message, player)
+
+
+# ============================================================
+# /SETANKET
+# ============================================================
+
+@dp.message(Command("setanket"))
+async def cmd_setanket(message: Message):
+    user_id = message.from_user.id
+
+    player = await get_player(user_id)
+
+    if not player:
+        await message.answer(
+            "Анкета не найдена.\n\n"
+            "Сначала зарегистрируйтесь в игре через /start."
+        )
+        return
+
+    text = message.text or ""
+
+    url_match = re.search(
+        r"https?://\S+",
+        text
+    )
+
+    if not url_match:
+        await message.answer(
+            "Анкета не найдена.\n\n"
+            "Укажите ссылку на пост анкеты.\n"
+            "Пример:\n"
+            "/setanket https://t.me/..."
+        )
+        return
+
+    url = url_match.group(0).rstrip(
+        ".,!?)"
+    )
+
+    await db_pool.execute(
+        """
+        UPDATE players
+        SET anketa_url = $1
+        WHERE user_id = $2
+        """,
+        url,
+        user_id
+    )
+
+    await message.answer(
+        "✅ Анкета сохранена!"
+    )
+
+    # Добавляем событие о новой/обновлённой анкете.
+    await add_event_to_buffer(
         message,
-        player
+        event_type="Новая анкета",
+        text=(
+            f"Игрок @{clean_username(message.from_user.username) "
+            f"or 'без username'} добавил анкету."
+        ),
+        username=message.from_user.username,
+        anketa_url=url
     )
 
 
 # ============================================================
-# RANDOM
+# /RANDOM
 # ============================================================
 
 @dp.message(Command("random"))
-async def cmd_random(
-    message: Message,
-    command: CommandObject
-):
-    user = message.from_user
+async def cmd_random(message: Message):
+    args = message.text.split()
 
-    if not user:
-        return
-
-    args = (command.args or "").split()
-
-    if len(args) < 2:
+    if len(args) < 3:
         await message.answer(
             "Использование:\n"
             "/random str @username\n\n"
-            "Доступные статы: str, rep, con, money"
+            "Доступные характеристики:\n"
+            "str, rep, con, money"
         )
         return
 
-    stat = args[0].lower()
-    enemy_username = args[1].lstrip("@")
+    stat = args[1].lower()
+    enemy_username = clean_username(args[2])
 
     stat_map = {
-        "str": 2,
-        "rep": 3,
-        "con": 4,
-        "money": 5
+        "str": "str",
+        "rep": "rep",
+        "con": "con",
+        "money": "money",
     }
 
     if stat not in stat_map:
         await message.answer(
             "Неверный стат.\n\n"
-            "Используй: str, rep, con, money"
+            "Используйте:\n"
+            "str, rep, con, money"
         )
         return
 
-    player = await get_player(user.id)
+    player = await get_player(
+        message.from_user.id
+    )
 
     if not player:
         await message.answer(
-            "Ты ещё не зарегистрирован.\n\n"
-            "Используй /start."
+            "Вы ещё не зарегистрированы.\n"
+            "Напишите /start."
         )
         return
 
@@ -835,1240 +1385,300 @@ async def cmd_random(
         )
         return
 
-    player_stat = int(player[stat_map[stat]])
-    enemy_stat = int(enemy[stat_map[stat]])
+    player_stat = player[stat_map[stat]]
+    enemy_stat = enemy[stat_map[stat]]
 
     total = player_stat + enemy_stat
 
     if total <= 0:
         player_chance = 50
+        enemy_chance = 50
     else:
         player_chance = (
             player_stat / total
         ) * 100
 
+        enemy_chance = (
+            enemy_stat / total
+        ) * 100
+
+    import random
+
     roll = random.uniform(0, 100)
 
     if roll <= player_chance:
-        winner = f"@{player[1]}"
+        winner = f"Вы (@{player['username']})"
     else:
-        winner = f"@{enemy[1]}"
-
-    text = (
-        "🎲 *РЕЗУЛЬТАТ*\n\n"
-
-        f"@{player[1]} "
-        f"({stat.upper()} {player_stat})\n"
-
-        "vs\n"
-
-        f"@{enemy[1]} "
-        f"({stat.upper()} {enemy_stat})\n\n"
-
-        f"Ваш шанс: {player_chance:.1f}%\n"
-        f"Шанс противника: "
-        f"{100 - player_chance:.1f}%\n\n"
-
-        f"🏆 Победитель: *{winner}*!"
-    )
+        winner = f"@{enemy['username']}"
 
     await message.answer(
-        text,
+        f"""
+🎲 *РЕЗУЛЬТАТ*
+
+Вы ({stat.upper()} {player_stat})
+vs
+@{enemy['username']} ({stat.upper()} {enemy_stat})
+
+Ваш шанс: {player_chance:.1f}%
+Шанс врага: {enemy_chance:.1f}%
+
+🎯 Бросок: {roll:.1f}
+
+🏆 Победитель: {winner}!
+""",
         parse_mode="Markdown"
     )
 
 
 # ============================================================
-# GROQ
+# АДМИНСКИЕ КОМАНДЫ
 # ============================================================
 
-groq_news_available = False
-groq_structured_available = False
-
-
-async def check_groq_api() -> bool:
-    global groq_news_available, groq_structured_available
-
-    groq_news_available = False
-    groq_structured_available = False
-
-    if not GROQ_API_KEY:
-        logger.error(
-            "GROQ_API_KEY отсутствует. ИИ-функции отключены."
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer(
+            "Недостаточно прав."
         )
-        return False
-
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    timeout = aiohttp.ClientTimeout(total=15)
-
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for label, model_name in (
-                ("news", GROQ_MODEL),
-                ("structured", GROQ_STRUCTURED_MODEL),
-            ):
-                url = f"https://api.groq.com/openai/v1/models/{model_name}"
-                try:
-                    async with session.get(url, headers=headers) as response:
-                        body = await response.text()
-                        if response.status == 200:
-                            logger.info(
-                                "Groq model OK (%s): %s", label, model_name
-                            )
-                            if label == "news":
-                                groq_news_available = True
-                            else:
-                                groq_structured_available = True
-                        else:
-                            logger.error(
-                                "Groq model FAILED (%s): %s | HTTP %s: %s",
-                                label, model_name, response.status, body[:500]
-                            )
-                except Exception:
-                    logger.exception(
-                        "Ошибка проверки Groq model (%s): %s",
-                        label, model_name
-                    )
-
-    except Exception:
-        logger.exception("Ошибка подключения к Groq API.")
-
-    return groq_news_available or groq_structured_available
-
-
-async def groq_request(
-    messages: list,
-    response_format: dict | None = None,
-    temperature: float = 0.2,
-    max_tokens: int = 1000,
-    model_name: str | None = None
-):
-    selected_model = model_name or GROQ_MODEL
-    if selected_model == GROQ_STRUCTURED_MODEL:
-        if not groq_structured_available:
-            return None
-    elif not groq_news_available:
-        return None
-
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    data = {
-        "model": selected_model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_completion_tokens": max_tokens
-    }
-
-    if response_format:
-        data["response_format"] = response_format
-
-    timeout = aiohttp.ClientTimeout(
-        total=60
-    )
-
-    for attempt in range(3):
-        try:
-            async with aiohttp.ClientSession(
-                timeout=timeout
-            ) as session:
-
-                async with session.post(
-                    GROQ_URL,
-                    headers=headers,
-                    json=data
-                ) as response:
-
-                    body = await response.text()
-
-                    if response.status != 200:
-                        logger.error(
-                            "Groq HTTP %s: %s",
-                            response.status,
-                            body[:1000]
-                        )
-
-                        if response.status in {
-                            429,
-                            500,
-                            502,
-                            503,
-                            504
-                        }:
-                            await asyncio.sleep(
-                                2 ** attempt
-                            )
-                            continue
-
-                        return None
-
-                    result = json.loads(body)
-
-                    content = (
-                        result
-                        .get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content")
-                    )
-
-                    if not content:
-                        logger.error(
-                            "Groq вернул ответ "
-                            "без content."
-                        )
-                        return None
-
-                    return content
-
-        except asyncio.TimeoutError:
-            logger.error(
-                "Groq timeout, попытка %s/3",
-                attempt + 1
-            )
-
-        except Exception:
-            logger.exception(
-                "Ошибка запроса к Groq, "
-                "попытка %s/3",
-                attempt + 1
-            )
-
-        await asyncio.sleep(
-            2 ** attempt
-        )
-
-    return None
-
-
-# ============================================================
-# AI — STAT ANALYSIS
-# ============================================================
-
-async def analyze_stats(text: str):
-    schema = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "game_stats",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "str": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 2
-                    },
-                    "rep": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 7
-                    },
-                    "con": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 8
-                    },
-                    "money": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 1000
-                    },
-                    "bad_boy": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 1
-                    },
-                    "good_boy": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 1
-                    },
-                    "event": {
-                        "type": "boolean"
-                    },
-                    "event_summary": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "str",
-                    "rep",
-                    "con",
-                    "money",
-                    "bad_boy",
-                    "good_boy",
-                    "event",
-                    "event_summary"
-                ],
-                "additionalProperties": False
-            }
-        }
-    }
-
-    prompt = f"""
-Ты аналитик текстовой ролевой игры.
-
-Проанализируй игровой пост.
-
-ВАЖНО:
-- Не выдумывай действия, которых нет в тексте.
-- Начисляй только небольшие целые значения.
-- Если действие явно не относится к характеристике — ставь 0.
-- STR: драки, физическая активность, спорт, силовые действия.
-- REP: помощь другим, красивые игровые действия, публичные события,
-  лидерство, администрирование сюжета, заметные конфликты.
-- CON: знакомства, сделки, переговоры, отношения, контакты,
-  сюжетные связи.
-- MONEY: заработок, сделки, задания, получение денег.
-- bad_boy/good_boy — только если текст явно отражает соответствующее
-  поведение.
-
-Сообщение:
-{text}
-"""
-
-    content = await groq_request(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Отвечай только в соответствии с "
-                    "JSON-схемой."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        response_format=schema,
-        temperature=0.1,
-        max_tokens=500,
-        model_name=GROQ_STRUCTURED_MODEL
-    )
-
-    if not content:
-        return None
-
-    try:
-        data = json.loads(content)
-
-        return {
-            "str": max(0, int(data.get("str", 0))),
-            "rep": max(0, int(data.get("rep", 0))),
-            "con": max(0, int(data.get("con", 0))),
-            "money": max(0, int(data.get("money", 0))),
-            "bad_boy": max(
-                0,
-                min(1, int(data.get("bad_boy", 0)))
-            ),
-            "good_boy": max(
-                0,
-                min(1, int(data.get("good_boy", 0)))
-            ),
-            "event": bool(data.get("event", False)),
-            "event_summary": str(
-                data.get("event_summary", "")
-            ).strip()
-        }
-
-    except (json.JSONDecodeError, TypeError, ValueError):
-        logger.exception(
-            "Некорректный JSON от Groq: %s",
-            content[:1000]
-        )
-
-        return None
-
-
-# ============================================================
-# AI — NEWS EVENT ANALYSIS
-# ============================================================
-
-async def analyze_news_event(
-    text: str,
-    username: str
-):
-    schema = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "news_event",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "is_event": {
-                        "type": "boolean"
-                    },
-                    "event_type": {
-                        "type": "string"
-                    },
-                    "summary": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "is_event",
-                    "event_type",
-                    "summary"
-                ],
-                "additionalProperties": False
-            }
-        }
-    }
-
-    prompt = f"""
-Ты редактор криминальной хроники текстовой ролевой игры.
-
-Определи, есть ли в сообщении событие, которое потенциально
-может попасть в городскую новость.
-
-Не каждое сообщение является событием.
-
-Интересуют:
-- встречи;
-- конфликты;
-- драки;
-- сделки;
-- необычные происшествия;
-- появление новых людей;
-- заметные действия игроков;
-- слухи;
-- события из флудовой жизни игроков, если они могут быть
-  интересно превращены в игровую городскую хронику.
-
-Не выдумывай факты.
-
-Игрок: @{username}
-
-Текст:
-{text}
-"""
-
-    content = await groq_request(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Отвечай только JSON."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        response_format=schema,
-        temperature=0.2,
-        max_tokens=300,
-        model_name=GROQ_STRUCTURED_MODEL
-    )
-
-    if not content:
-        return None
-
-    try:
-        data = json.loads(content)
-
-        return {
-            "is_event": bool(
-                data.get("is_event", False)
-            ),
-            "event_type": str(
-                data.get("event_type", "other")
-            ),
-            "summary": str(
-                data.get("summary", "")
-            ).strip()
-        }
-
-    except (
-        json.JSONDecodeError,
-        TypeError,
-        ValueError
-    ):
-        logger.exception(
-            "Ошибка JSON анализа события."
-        )
-
-        return None
-
-
-# ============================================================
-# EVENTS
-# ============================================================
-
-async def save_event(
-    user_id: int | None,
-    username: str,
-    event_type: str,
-    summary: str,
-    source_topic: int,
-    source_message_id: int,
-    source_url: str | None
-):
-    if not summary:
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO events (
-                user_id,
-                username,
-                event_type,
-                summary,
-                source_topic,
-                source_message_id,
-                source_url,
-                created_at,
-                published
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-            """,
-            (
-                user_id,
-                username,
-                event_type,
-                summary,
-                source_topic,
-                source_message_id,
-                source_url,
-                dt_to_str(now_utc())
-            )
+    player_count = await db_pool.fetchval(
+        "SELECT COUNT(*) FROM players"
+    )
+
+    action_count = await db_pool.fetchval(
+        "SELECT COUNT(*) FROM actions"
+    )
+
+    await message.answer(
+        f"""
+📊 *СТАТИСТИКА БОТА*
+
+Игроков: {player_count}
+Действий: {action_count}
+Новостей в буфере: {len(event_buffer)}
+База: PostgreSQL
+""",
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(Command("player"))
+async def cmd_player(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer(
+            "Недостаточно прав."
         )
-
-        await db.commit()
-
-
-async def save_action(
-    user_id: int,
-    action_type: str,
-    value: int
-):
-    if value == 0:
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO actions (
-                user_id,
-                action_type,
-                action_value,
-                timestamp
-            )
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                action_type,
-                value,
-                dt_to_str(now_utc())
-            )
+    args = message.text.split()
+
+    if len(args) < 2:
+        await message.answer(
+            "Использование:\n"
+            "/player @username"
         )
+        return
 
-        await db.commit()
-
-
-# ============================================================
-# INACTIVITY / WEEKLY LIMITS
-# ============================================================
-
-async def prepare_player_for_activity(
-    player
-):
-    """
-    Проверяет:
-    1. нужно ли вернуть игрока из "Читателя";
-    2. нужно ли сбросить недельные лимиты.
-    """
-
-    user_id = player[0]
-
-    status = player[8]
-
-    last_post = str_to_dt(player[6])
-    week_reset = str_to_dt(player[15])
-
-    reactivated = False
-
-    current = now_utc()
-
-    # --------------------------------------------------------
-    # Возвращение из "Читателя"
-    # --------------------------------------------------------
-
-    if (
-        status == "Читатель"
-        and last_post
-        and current - last_post
-        >= timedelta(days=INACTIVITY_DAYS)
-    ):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                """
-                UPDATE players
-                SET
-                    status = 'Игрок',
-                    str = ?,
-                    rep = ?,
-                    con = ?,
-                    money = ?,
-                    last_post = ?,
-                    str_week_limit = 0,
-                    rep_week_limit = 0,
-                    con_week_limit = 0,
-                    money_week_limit = 0,
-                    week_reset = ?
-                WHERE user_id = ?
-                """,
-                (
-                    INACTIVE_STR,
-                    INACTIVE_REP,
-                    INACTIVE_CON,
-                    INACTIVE_MONEY,
-                    dt_to_str(current),
-                    dt_to_str(current),
-                    user_id
-                )
-            )
-
-            await db.commit()
-
-        reactivated = True
-
-    # --------------------------------------------------------
-    # Недельный сброс
-    # --------------------------------------------------------
-
-    elif (
-        week_reset is None
-        or current - week_reset
-        >= timedelta(days=7)
-    ):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                """
-                UPDATE players
-                SET
-                    str_week_limit = 0,
-                    rep_week_limit = 0,
-                    con_week_limit = 0,
-                    money_week_limit = 0,
-                    week_reset = ?
-                WHERE user_id = ?
-                """,
-                (
-                    dt_to_str(current),
-                    user_id
-                )
-            )
-
-            await db.commit()
-
-    return reactivated
-
-
-# ============================================================
-# UPDATE STATS
-# ============================================================
-
-async def apply_stats(
-    user_id: int,
-    username: str,
-    text: str,
-    topic_id: int,
-    message: Message
-):
-    player = await get_player(user_id)
+    player = await get_player_by_username(
+        args[1]
+    )
 
     if not player:
-        # Регистрация только через /start. Посты сами по себе
-        # не должны регистрировать человека в игре.
-        logger.info(
-            "Сообщение от незарегистрированного пользователя %s пропущено.",
-            user_id
+        await message.answer(
+            "Игрок не найден."
         )
         return
 
-    await update_username(
-        user_id,
-        username
-    )
-
-    reactivated = await prepare_player_for_activity(
-        player
-    )
-
-    if reactivated:
-        try:
-            await bot.send_message(
-                user_id,
-                (
-                    "🔄 Ты вернулся в игру!\n\n"
-                    "После долгого отсутствия твой статус "
-                    "изменён обратно на «Игрок».\n\n"
-                    f"Начальные возвращённые статы:\n"
-                    f"STR: {INACTIVE_STR}\n"
-                    f"REP: {INACTIVE_REP}\n"
-                    f"CON: {INACTIVE_CON}\n"
-                    f"MONEY: {INACTIVE_MONEY}\n\n"
-                    "Продолжай писать в игровых темах."
-                )
-            )
-        except Exception:
-            logger.exception(
-                "Не удалось отправить сообщение "
-                "о возвращении игроку %s",
-                user_id
-            )
-
-        player = await get_player(user_id)
-
-    # last_post обновляем даже если пост меньше 300 символов:
-    # человек считается активным.
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            UPDATE players
-            SET last_post = ?, username = ?
-            WHERE user_id = ?
-            """,
-            (
-                dt_to_str(now_utc()),
-                normalize_username(username),
-                user_id
-            )
-        )
-
-        await db.commit()
-
-    # Для статистики нужен минимум 300 символов.
-    if len(text.strip()) < MIN_STAT_CHARS:
-        return
-
-    result = await analyze_stats(text)
-
-    if not result:
-        logger.warning(
-            "Статы не начислены: ИИ не вернул корректный результат."
-        )
-        return
-
-    # Снова читаем игрока, потому что недельный сброс мог произойти.
-    player = await get_player(user_id)
-
-    current_str_week = player[11]
-    current_rep_week = player[12]
-    current_con_week = player[13]
-    current_money_week = player[14]
-
-    add_str = min(
-        result["str"],
-        max(
-            0,
-            WEEKLY_STR_LIMIT - current_str_week
-        )
-    )
-
-    add_rep = min(
-        result["rep"],
-        max(
-            0,
-            WEEKLY_REP_LIMIT - current_rep_week
-        )
-    )
-
-    add_con = min(
-        result["con"],
-        max(
-            0,
-            WEEKLY_CON_LIMIT - current_con_week
-        )
-    )
-
-    add_money = min(
-        result["money"],
-        max(
-            0,
-            WEEKLY_MONEY_LIMIT - current_money_week
-        )
-    )
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            UPDATE players
-            SET
-                str = str + ?,
-                rep = rep + ?,
-                con = con + ?,
-                money = money + ?,
-
-                bad_boy_count =
-                    bad_boy_count + ?,
-
-                good_boy_count =
-                    good_boy_count + ?,
-
-                str_week_limit =
-                    str_week_limit + ?,
-
-                rep_week_limit =
-                    rep_week_limit + ?,
-
-                con_week_limit =
-                    con_week_limit + ?,
-
-                money_week_limit =
-                    money_week_limit + ?
-            WHERE user_id = ?
-            """,
-            (
-                add_str,
-                add_rep,
-                add_con,
-                add_money,
-                result["bad_boy"],
-                result["good_boy"],
-                add_str,
-                add_rep,
-                add_con,
-                add_money,
-                user_id
-            )
-        )
-
-        await db.commit()
-
-    await save_action(
-        user_id,
-        "str",
-        add_str
-    )
-
-    await save_action(
-        user_id,
-        "rep",
-        add_rep
-    )
-
-    await save_action(
-        user_id,
-        "con",
-        add_con
-    )
-
-    await save_action(
-        user_id,
-        "money",
-        add_money
-    )
-
-    # Сохраняем событие только если ИИ считает его заметным.
-    if (
-        result["event"]
-        and result["event_summary"]
-    ):
-        await save_event(
-            user_id=user_id,
-            username=normalize_username(username),
-            event_type="game_event",
-            summary=result["event_summary"],
-            source_topic=topic_id,
-            source_message_id=message.message_id,
-            source_url=build_message_link(message)
-        )
+    await show_profile(message, player)
 
 
 # ============================================================
-# MESSAGE HANDLER
+# ОБРАБОТКА СООБЩЕНИЙ
 # ============================================================
 
 @dp.message()
 async def handle_message(message: Message):
-    """
-    Общий обработчик сообщений.
-
-    ВАЖНО:
-    Поскольку новости публикуются в STORY_TOPIC_ID,
-    эта тема здесь явно исключается.
-
-    Поэтому бот не будет читать собственные новости.
-    """
-
-    if message.chat.id != GROUP_ID:
-        return
-
-    topic_id = message.message_thread_id
-
-    if topic_id is None:
-        return
-
-    # Повествование, админка и инфо игнорируются
-    # как обычные сообщения.
-    if topic_id in IGNORED_TOPIC_IDS:
-        return
-
-    user = message.from_user
-
-    if not user or user.is_bot:
-        return
-
-    if not await mark_message_processed(message):
-        logger.info(
-            "Повторное сообщение пропущено: chat=%s message=%s",
-            message.chat.id, message.message_id
-        )
-        return
-
-    username = normalize_username(
-        user.username
-    )
-
-    text = message.text or message.caption or ""
-
-    if not text.strip():
-        return
-
-    # --------------------------------------------------------
-    # АНКЕТЫ
-    # --------------------------------------------------------
-
-    if topic_id == PROFILES_TOPIC_ID:
-        # Анкета сохраняется только для зарегистрированного игрока.
-        player = await get_player(user.id)
-
-        if not player:
-            await bot.send_message(
-                user.id,
-                "Анкета не найдена. Сначала зарегистрируйся командой /start."
-            )
+    try:
+        # Нас интересует только наша группа.
+        if message.chat.id != GROUP_ID_INT:
             return
 
-        url = build_message_link(
-            message
-        )
+        # В канале/группе без автора не работаем.
+        if not message.from_user:
+            return
 
-        if url:
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    """
-                    UPDATE players
-                    SET anketa_url = ?
-                    WHERE user_id = ?
-                    """,
-                    (
-                        url,
-                        user.id
-                    )
+        text = message.text or message.caption or ""
+
+        if not text:
+            return
+
+        topic_id = get_topic_id(message)
+
+        # ----------------------------------------------------
+        # АДМИНКА
+        # ----------------------------------------------------
+
+        if topic_id == ADMIN_TOPIC_ID_INT:
+            return
+
+        # ----------------------------------------------------
+        # ИНФОРМАЦИОННАЯ ТЕМА
+        # ----------------------------------------------------
+
+        if topic_id == INFO_TOPIC_ID_INT:
+            return
+
+        # ----------------------------------------------------
+        # ПОВЕСТВОВАНИЕ
+        # ----------------------------------------------------
+
+        if topic_id == STORY_TOPIC_ID_INT:
+            return
+
+        # ----------------------------------------------------
+        # ИГРОВЫЕ ТЕМЫ
+        # ----------------------------------------------------
+
+        if topic_id in {
+            GAME_TOPIC_ID_INT,
+            SEMI_RP_TOPIC_ID_INT
+        }:
+
+            # Статы считаются только из сообщений
+            # длиной от 300 символов.
+            if len(text) >= MIN_TEXT_FOR_STATS:
+                await update_stats(
+                    user_id=message.from_user.id,
+                    username=message.from_user.username,
+                    text=text,
+                    message_id=message.message_id,
+                    topic_id=topic_id
                 )
 
-                await db.commit()
-
-            await save_event(
-                user_id=user.id,
-                username=username,
-                event_type="new_player",
-                summary=(
-                    f"В городе появилась новая личность "
-                    f"@{username}. "
-                    f"Ссылка на досье должна вести на анкету."
-                ),
-                source_topic=topic_id,
-                source_message_id=message.message_id,
-                source_url=url
+            # А новости могут использовать и короткие сообщения.
+            await add_event_to_buffer(
+                message,
+                event_type="Игровое событие",
+                text=text,
+                username=message.from_user.username
             )
 
-        return
+            return
 
-    # --------------------------------------------------------
-    # НОВОСТНЫЕ ТЕМЫ
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # ФЛУД
+        # ----------------------------------------------------
 
-    if topic_id in NEWS_TOPIC_IDS:
+        if topic_id == FLOOD_TOPIC_ID_INT:
 
-        # Для статистики отдельно.
-        if topic_id in STAT_TOPIC_IDS:
-            await apply_stats(
-                user.id,
-                username,
-                text,
-                topic_id,
-                message
+            # Во флуде статы НЕ начисляются.
+
+            # Но сообщения могут использоваться
+            # как материал для городской хроники.
+            await add_event_to_buffer(
+                message,
+                event_type="Флуд",
+                text=text,
+                username=message.from_user.username
             )
 
-        # Новости могут использовать сообщения короче 300.
-        if len(text.strip()) >= MIN_NEWS_CHARS:
-            event = await analyze_news_event(
-                text,
-                username
+            return
+
+        # ----------------------------------------------------
+        # АНКЕТЫ
+        # ----------------------------------------------------
+
+        if topic_id == PROFILES_TOPIC_ID_INT:
+
+            await handle_profile_post(
+                message,
+                text
             )
 
-            if (
-                event
-                and event["is_event"]
-                and event["summary"]
-            ):
-                await save_event(
-                    user_id=user.id,
-                    username=username,
-                    event_type=event["event_type"],
-                    summary=event["summary"],
-                    source_topic=topic_id,
-                    source_message_id=message.message_id,
-                    source_url=build_message_link(message)
-                )
-
-        return
-
-
-# ============================================================
-# NEWS GENERATOR
-# ============================================================
-
-async def get_unpublished_events(limit: int = 30):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            """
-            SELECT
-                id,
-                username,
-                event_type,
-                summary,
-                source_url
-            FROM events
-            WHERE published = 0
-            ORDER BY created_at ASC
-            LIMIT ?
-            """,
-            (limit,)
-        )
-
-        rows = await cursor.fetchall()
-        await cursor.close()
-
-        return rows
-
-
-async def generate_news_from_events():
-    events = await get_unpublished_events()
-
-    if not events:
-        logger.info(
-            "Новых событий для новости нет."
-        )
-        return
-
-    event_lines = []
-
-    for row in events:
-        event_id = row[0]
-        username = row[1]
-        event_type = row[2]
-        summary = row[3]
-
-        event_lines.append(
-            f"- ID события: {event_id}\n"
-            f"  Игрок: @{username}\n"
-            f"  Тип: {event_type}\n"
-            f"  Событие: {summary}"
-        )
-
-    events_text = "\n\n".join(
-        event_lines
-    )
-
-    prompt = f"""
-Ты редактор криминальной хроники
-для текстовой ролевой игры.
-
-Сеттинг:
-современный альтернативный город,
-реалистичный криминальный нуар,
-без магии и фантастики.
-
-На основе реальных игровых событий ниже
-создай одну связанную городскую новость.
-
-Правила:
-- 2–5 абзацев.
-- Не перечисляй игроков как список.
-- Не выдумывай конкретные факты, которых нет в событиях.
-- Можно художественно связать подтверждённые события.
-- Тон: городская криминальная хроника.
-- Новость должна ощущаться как событие внутри города.
-- Если среди событий есть новый персонаж,
-  можно использовать формулировки вроде:
-  "в городе замечена новая личность",
-  "новое лицо появилось на улицах",
-  "камеры зафиксировали..."
-- Если есть ссылка на анкету, её нужно сохранить
-  как отдельную строку в конце.
-- Не создавай Markdown-ссылки сам.
-- Не добавляй URL, если его нет в данных.
-
-События:
-
-{events_text}
-"""
-
-    content = await groq_request(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Ты пишешь только текст городской новости."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        temperature=0.8,
-        max_tokens=800
-    )
-
-    if not content:
-        logger.error(
-            "Не удалось сгенерировать новость."
-        )
-        return
-
-    news = content.strip()
-
-    # Добавляем ссылки на анкеты,
-    # которые реально есть среди событий.
-    profile_links = []
-
-    for row in events:
-        event_type = row[2]
-        source_url = row[4]
-
-        if (
-            event_type == "new_player"
-            and source_url
-        ):
-            profile_links.append(
-                source_url
-            )
-
-    if profile_links:
-        news += (
-            "\n\n📋 *Досье новых лиц:*\n"
-            + "\n".join(
-                f"• {url}"
-                for url in profile_links
-            )
-        )
-
-    try:
-        await bot.send_message(
-            GROUP_ID,
-            "📰 *ГОРОДСКАЯ ХРОНИКА*\n\n" + news,
-            message_thread_id=STORY_TOPIC_ID,
-            parse_mode="Markdown"
-        )
+            return
 
     except Exception:
         logger.exception(
-            "Не удалось отправить новость "
-            "в тему Повествование."
+            "Ошибка обработки сообщения %s",
+            message.message_id
         )
-        return
 
-    event_ids = [
-        row[0]
-        for row in events
-    ]
 
-    placeholders = ",".join(
-        "?" for _ in event_ids
+# ============================================================
+# ОБРАБОТКА ПОСТА АНКЕТЫ
+# ============================================================
+
+async def handle_profile_post(
+    message,
+    text
+):
+    user_id = message.from_user.id
+    username = message.from_user.username
+
+    player = await get_player(user_id)
+
+    if not player:
+        player, _ = await register_player(
+            user_id,
+            username,
+            initial_stats=True
+        )
+
+    # Ссылка на конкретный Telegram-пост.
+    if message.chat.type in {
+        "group",
+        "supergroup"
+    }:
+        # Для private supergroup корректная ссылка
+        # формируется через /c/ + internal chat id.
+        internal_chat_id = str(
+            abs(message.chat.id)
+        )
+
+        if internal_chat_id.startswith("100"):
+            internal_chat_id = internal_chat_id[3:]
+
+        anketa_url = (
+            f"https://t.me/c/"
+            f"{internal_chat_id}/"
+            f"{message.message_id}"
+        )
+    else:
+        anketa_url = None
+
+    await db_pool.execute(
+        """
+        UPDATE players
+        SET anketa_url = $1
+        WHERE user_id = $2
+        """,
+        anketa_url,
+        user_id
     )
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            f"""
-            UPDATE events
-            SET published = 1
-            WHERE id IN ({placeholders})
-            """,
-            event_ids
-        )
-
-        await db.commit()
+    await add_event_to_buffer(
+        message,
+        event_type="Новая анкета",
+        text=(
+            "В теме анкет появился новый персонаж. "
+            f"Текст анкеты: {text[:1800]}"
+        ),
+        username=username,
+        anketa_url=anketa_url
+    )
 
     logger.info(
-        "Опубликована новость из %s событий.",
-        len(events)
+        "Обработана анкета пользователя %s",
+        user_id
     )
 
 
-async def news_loop():
-    while True:
-        try:
-            await asyncio.sleep(
-                NEWS_INTERVAL_HOURS * 60 * 60
-            )
-
-            await generate_news_from_events()
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception:
-            logger.exception(
-                "Ошибка в news_loop."
-            )
-
-            await asyncio.sleep(60)
-
-
 # ============================================================
-# WEEKLY RESET LOOP
+# НЕАКТИВНОСТЬ
 # ============================================================
 
-async def weekly_reset_loop():
-    """Фоновая страховка: недельные лимиты сбрасываются даже без нового поста."""
-    while True:
-        try:
-            await asyncio.sleep(60 * 60)
-            cutoff = now_utc() - timedelta(days=7)
-
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    """
-                    UPDATE players
-                    SET
-                        str_week_limit = 0,
-                        rep_week_limit = 0,
-                        con_week_limit = 0,
-                        money_week_limit = 0,
-                        week_reset = ?
-                    WHERE week_reset IS NULL OR week_reset < ?
-                    """,
-                    (dt_to_str(now_utc()), dt_to_str(cutoff))
-                )
-                await db.commit()
-
-            logger.info("Проверка недельных лимитов выполнена.")
-
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Ошибка weekly_reset_loop.")
-            await asyncio.sleep(60)
-
-
-# ============================================================
-# INACTIVITY LOOP
-# ============================================================
-
-async def inactivity_loop():
+async def check_inactivity():
     while True:
         try:
             await asyncio.sleep(
@@ -2079,70 +1689,61 @@ async def inactivity_loop():
                 days=INACTIVITY_DAYS
             )
 
-            async with aiosqlite.connect(DB_PATH) as db:
-                cursor = await db.execute(
-                    """
-                    SELECT user_id, username
-                    FROM players
-                    WHERE last_post IS NOT NULL
-                    AND last_post < ?
+            inactive_players = await db_pool.fetch(
+                """
+                SELECT *
+                FROM players
+                WHERE
+                    last_post IS NOT NULL
+                    AND last_post < $1
                     AND status != 'Читатель'
+                """,
+                cutoff
+            )
+
+            for player in inactive_players:
+
+                await db_pool.execute(
+                    """
+                    UPDATE players
+                    SET
+                        status = 'Читатель',
+                        str = 1,
+                        rep = 1,
+                        con = 1,
+                        money = 100
+                    WHERE user_id = $1
                     """,
-                    (dt_to_str(cutoff),)
+                    player["user_id"]
                 )
 
-                inactive = await cursor.fetchall()
-                await cursor.close()
-
-                for user_id, username in inactive:
-                    await db.execute(
-                        """
-                        UPDATE players
-                        SET
-                            status = 'Читатель',
-                            str = ?,
-                            rep = ?,
-                            con = ?,
-                            money = ?
-                        WHERE user_id = ?
-                        """,
-                        (
-                            INACTIVE_STR,
-                            INACTIVE_REP,
-                            INACTIVE_CON,
-                            INACTIVE_MONEY,
-                            user_id
-                        )
-                    )
-
-                await db.commit()
-
-            for user_id, username in inactive:
                 try:
                     await bot.send_message(
-                        user_id,
-                        (
-                            "⚠️ Ты давно не писал в игровых "
-                            "темах и переведён в статус "
-                            "«Читатель».\n\n"
+                        player["user_id"],
+                        """
+⚠️ Ты долго не писал в игровых темах.
 
-                            "Твои игровые характеристики "
-                            "сброшены до базовых:\n"
-                            f"STR: {INACTIVE_STR}\n"
-                            f"REP: {INACTIVE_REP}\n"
-                            f"CON: {INACTIVE_CON}\n"
-                            f"MONEY: {INACTIVE_MONEY}\n\n"
+Твой статус изменён на «Читатель».
 
-                            "Чтобы вернуться в игру, "
-                            "просто начни снова писать."
-                        )
+Статы возвращены к базовым:
+
+💪 STR: 1
+🌟 REP: 1
+🤝 CON: 1
+💰 MONEY: 100
+
+Чтобы вернуться в игру, просто начни снова писать
+в игровых темах.
+После нового игрового сообщения статус автоматически
+изменится обратно на «Игрок».
+"""
                     )
 
                 except Exception:
                     logger.exception(
-                        "Не удалось уведомить "
-                        "неактивного игрока %s",
-                        user_id
+                        "Не удалось отправить уведомление "
+                        "неактивному игроку %s",
+                        player["user_id"]
                     )
 
         except asyncio.CancelledError:
@@ -2150,14 +1751,12 @@ async def inactivity_loop():
 
         except Exception:
             logger.exception(
-                "Ошибка inactivity_loop."
+                "Ошибка проверки неактивности."
             )
-
-            await asyncio.sleep(60)
 
 
 # ============================================================
-# WEEKLY TOP
+# ТОП ИГРОКОВ
 # ============================================================
 
 async def publish_top():
@@ -2167,27 +1766,22 @@ async def publish_top():
                 7 * 24 * 60 * 60
             )
 
-            async with aiosqlite.connect(DB_PATH) as db:
-                cursor = await db.execute(
-                    """
-                    SELECT
-                        username,
-                        str,
-                        rep,
-                        con,
-                        money,
-                        status,
-                        bad_boy_count,
-                        good_boy_count
-                    FROM players
-                    WHERE status = 'Игрок'
-                    ORDER BY rep DESC
-                    LIMIT 10
-                    """
-                )
-
-                top = await cursor.fetchall()
-                await cursor.close()
+            top = await db_pool.fetch(
+                """
+                SELECT
+                    username,
+                    str,
+                    rep,
+                    con,
+                    money,
+                    status,
+                    bad_boy_count,
+                    good_boy_count
+                FROM players
+                ORDER BY rep DESC, str DESC
+                LIMIT 10
+                """
+            )
 
             if not top:
                 continue
@@ -2195,19 +1789,17 @@ async def publish_top():
             text = "🏆 *ТОП ИГРОКОВ*\n\n"
 
             for i, player in enumerate(top, 1):
-                username = player[0] or "unknown"
-
                 badge = get_badge(
-                    player[6],
-                    player[7]
+                    player["bad_boy_count"],
+                    player["good_boy_count"]
                 )
 
                 text += (
-                    f"{i}. @{username} — "
-                    f"REP: {player[2]}, "
-                    f"STR: {player[1]}, "
-                    f"CON: {player[3]}, "
-                    f"MONEY: {player[4]}"
+                    f"{i}. @{player['username'] or 'unknown'} "
+                    f"— REP: {player['rep']}, "
+                    f"STR: {player['str']}, "
+                    f"CON: {player['con']}, "
+                    f"MONEY: {player['money']}"
                 )
 
                 if badge:
@@ -2216,9 +1808,9 @@ async def publish_top():
                 text += "\n"
 
             await bot.send_message(
-                GROUP_ID,
+                GROUP_ID_INT,
                 text,
-                message_thread_id=STORY_TOPIC_ID,
+                message_thread_id=STORY_TOPIC_ID_INT,
                 parse_mode="Markdown"
             )
 
@@ -2227,307 +1819,55 @@ async def publish_top():
 
         except Exception:
             logger.exception(
-                "Ошибка publish_top."
+                "Ошибка публикации топа."
             )
 
-            await asyncio.sleep(60)
-
 
 # ============================================================
-# ADMIN COMMANDS
-# ============================================================
-
-@dp.message(Command("admin_stats"))
-async def admin_stats(
-    message: Message,
-    command: CommandObject
-):
-    if not message.from_user or not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    args = (command.args or "").split()
-
-    if not args:
-        await message.answer(
-            "Использование:\n"
-            "/admin_stats @username"
-        )
-        return
-
-    player = await get_player_by_username(
-        args[0].lstrip("@")
-    )
-
-    if not player:
-        await message.answer(
-            "Игрок не найден."
-        )
-        return
-
-    await show_profile(
-        message,
-        player
-    )
-
-
-@dp.message(Command("admin_addstat"))
-async def admin_addstat(
-    message: Message,
-    command: CommandObject
-):
-    if not message.from_user or not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    args = (command.args or "").split()
-
-    if len(args) != 3:
-        await message.answer(
-            "Использование:\n"
-            "/admin_addstat @username rep 2\n\n"
-            "Статы: str, rep, con, money"
-        )
-        return
-
-    username = args[0].lstrip("@").lower()
-    stat = args[1].lower()
-
-    try:
-        value = int(args[2])
-    except ValueError:
-        await message.answer(
-            "Количество должно быть числом."
-        )
-        return
-
-    if stat not in {
-        "str",
-        "rep",
-        "con",
-        "money"
-    }:
-        await message.answer(
-            "Стат должен быть: "
-            "str, rep, con или money."
-        )
-        return
-
-    player = await get_player_by_username(
-        username
-    )
-
-    if not player:
-        await message.answer(
-            "Игрок не найден."
-        )
-        return
-
-    column = stat
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            f"""
-            UPDATE players
-            SET {column} = {column} + ?
-            WHERE user_id = ?
-            """,
-            (
-                value,
-                player[0]
-            )
-        )
-
-        await db.commit()
-
-    await message.answer(
-        f"✅ @{username}: "
-        f"{stat.upper()} изменён на {value}."
-    )
-
-
-@dp.message(Command("admin_reset"))
-async def admin_reset(
-    message: Message,
-    command: CommandObject
-):
-    if not message.from_user or not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    args = (command.args or "").split()
-
-    if not args:
-        await message.answer(
-            "Использование:\n"
-            "/admin_reset @username"
-        )
-        return
-
-    username = args[0].lstrip("@")
-
-    player = await get_player_by_username(
-        username
-    )
-
-    if not player:
-        await message.answer(
-            "Игрок не найден."
-        )
-        return
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            UPDATE players
-            SET
-                str = 1,
-                rep = 1,
-                con = 1,
-                money = 100,
-                status = 'Игрок',
-                str_week_limit = 0,
-                rep_week_limit = 0,
-                con_week_limit = 0,
-                money_week_limit = 0,
-                week_reset = ?
-            WHERE user_id = ?
-            """,
-            (
-                dt_to_str(now_utc()),
-                player[0]
-            )
-        )
-
-        await db.commit()
-
-    await message.answer(
-        f"✅ @{username} сброшен до:\n"
-        "STR 1\n"
-        "REP 1\n"
-        "CON 1\n"
-        "MONEY 100\n"
-        "Статус: Игрок"
-    )
-
-
-@dp.message(Command("admin_news"))
-async def admin_news(message: Message):
-    if not message.from_user or not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    await message.answer(
-        "📰 Запускаю генерацию новости..."
-    )
-
-    await generate_news_from_events()
-
-    await message.answer(
-        "Готово."
-    )
-
-
-# ============================================================
-# STARTUP
-# ============================================================
-
-async def startup_checks():
-    logger.info("Запуск проверки конфигурации...")
-
-    logger.info(
-        "GROUP_ID: %s",
-        GROUP_ID
-    )
-
-    logger.info(
-        "Темы: игра=%s, полурол=%s, инфо=%s, админка=%s, "
-        "анкеты=%s, флуд=%s, повествование=%s",
-        GAME_TOPIC_ID,
-        SEMI_RP_TOPIC_ID,
-        INFO_TOPIC_ID,
-        ADMIN_TOPIC_ID,
-        PROFILES_TOPIC_ID,
-        FLOOD_TOPIC_ID,
-        STORY_TOPIC_ID
-    )
-
-    logger.info(
-        "Groq models: news=%s, structured=%s",
-        GROQ_MODEL,
-        GROQ_STRUCTURED_MODEL
-    )
-
-    try:
-        me = await bot.get_me()
-
-        logger.info(
-            "Telegram Bot OK: @%s (%s)",
-            me.username,
-            me.id
-        )
-
-    except Exception:
-        logger.exception(
-            "BOT_TOKEN не прошёл проверку."
-        )
-        raise
-
-    await check_groq_api()
-
-
-# ============================================================
-# MAIN
+# ЗАПУСК
 # ============================================================
 
 async def main():
-    await init_db()
+    logger.info("Запуск бота...")
 
-    await startup_checks()
+    await create_database_pool()
 
-    if not groq_news_available:
-        logger.warning(
-            "⚠️ Модель новостей Groq недоступна. Новости отключены."
+    try:
+        await init_database()
+
+        logger.info(
+            "Бот подключён к группе %s.",
+            GROUP_ID_INT
         )
 
-    if not groq_structured_available:
-        logger.warning(
-            "⚠️ Структурированная модель Groq недоступна. Анализ статов и событий отключён."
-        )
+        tasks = [
+            asyncio.create_task(
+                generate_events_loop()
+            ),
+            asyncio.create_task(
+                check_inactivity()
+            ),
+            asyncio.create_task(
+                publish_top()
+            ),
+        ]
 
-    asyncio.create_task(
-        news_loop()
-    )
+        try:
+            await dp.start_polling(bot)
 
-    asyncio.create_task(
-        inactivity_loop()
-    )
+        finally:
+            for task in tasks:
+                task.cancel()
 
-    asyncio.create_task(
-        weekly_reset_loop()
-    )
+            await asyncio.gather(
+                *tasks,
+                return_exceptions=True
+            )
 
-    asyncio.create_task(
-        publish_top()
-    )
-
-    logger.info(
-        "Бот запущен."
-    )
-
-    await dp.start_polling(
-        bot
-    )
+    finally:
+        await close_database_pool()
+        await bot.session.close()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info(
-            "Бот остановлен."
-        )
+    asyncio.run(main())
