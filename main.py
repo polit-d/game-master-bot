@@ -361,7 +361,9 @@ async def handle_message(message: Message):
         text = message.text
         
         if text:
-            await update_stats(user_id, username, text)
+            # Проверяем, что сообщение не старше 7 дней
+            if message.date and (datetime.now() - message.date).days <= 7:
+                await update_stats(user_id, username, text)
 
 # Функция генерации событий (раз в 12 часов)
 async def generate_events():
