@@ -50,6 +50,17 @@ GROQ_STRUCTURED_MODEL = os.getenv(
     "openai/gpt-oss-20b"
 )
 
+NEWS_STYLE = os.getenv(
+    "NEWS_STYLE",
+    (
+        "Пиши на русском языке в литературном стиле "
+        "мрачной криминальной хроники альтернативного "
+        "современного города. Используй атмосферные детали, "
+        "запахи, звуки, погоду, свет и контраст роскоши "
+        "Не выдумывай факты и действия персонажей."
+    )
+)
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
@@ -139,9 +150,24 @@ event_buffer_lock = asyncio.Lock()
 
 MAX_EVENT_BUFFER = 100
 
+RANDOM_CITY_EVENTS = [
+    "в городе произошёл пожар",
+    "на одной из улиц случилась авария",
+    "празднично украсили главную улицу",
+    "в городе появились важные политические новости",
+    "полиция провела задержание",
+    "произошло ограбление",
+    "началась предвыборная кампания нового мэра",
+    "в городе возникли серьёзные проблемы с транспортом",
+    "радиоведущий подавился во время прямого эфира",
+    "в нескольких районах отключилось электричество",
+    "началась забастовка",
+    "открылось новое заведение",
+]
+
 MIN_TEXT_FOR_STATS = 300
 
-NEWS_INTERVAL_HOURS = 12
+NEWS_INTERVAL_HOURS = 6
 
 INACTIVITY_DAYS = 30
 
@@ -948,76 +974,201 @@ async def add_event_to_buffer(
     )
 
 
-async def generate_news_from_events():
-    async with event_buffer_lock:
-        if not event_buffer:
-            return None
+def format_news_character(
+    character_name,
+    username
+):
+    character_name = (
+        str(character_name or "").strip()
+    )
 
-        events = list(event_buffer)
+    username = clean_username(username)
 
-        # Очищаем буфер после забора.
-        event_buffer.clear()
+    if character_name and username:
+        return f"{character_name} (@{username})"
 
-    formatted_events = []
+    if character_name:
+        return character_name
 
-    for event in events:
-        formatted_events.append(
-            f"""
-Тип: {event['type']}
-Игрок: @{event['username'] or 'без username'}
-Тема: {event['topic']}
-Текст: {event['text']}
-Анкета: {event['anketa_url'] or 'нет'}
+    if username:
+        return f"персонаж без указанного имени (@{username})"
+
+    return "персонаж без указанного имени"
+
+
+async def get_news_events(
+    hours=6
+):
+    cutoff = now_utc() - timedelta(
+        hours=hours
+    )
+
+    return await db_pool.fetch(
+        """
+        SELECT
+            id,
+            user_id,
+            character_name,
+            username,
+            event_type,
+            text,
+            topic_name,
+            anketa_url,
+            created_at
+        FROM news_events
+        WHERE
+            created_at >= $1
+            AND used_in_news_at IS NULL
+        ORDER BY created_at ASC
+        LIMIT 300
+        """,
+        cutoff
+    )
+
+
+async def mark_news_events_used(
+    event_ids
+):
+    if not event_ids:
+        return
+
+    await db_pool.execute(
+        """
+        UPDATE news_events
+        SET used_in_news_at = NOW()
+        WHERE id = ANY($1::BIGINT[])
+        """,
+        event_ids
+    )
+
+
+async def generate_news_from_events(
+    hours=6
+):
+    events = await get_news_events(
+        hours=hours
+    )
+
+    event_ids = []
+
+    if events:
+        formatted_events = []
+
+        for event in events:
+            event_ids.append(event["id"])
+
+            author = format_news_character(
+                event["character_name"],
+                event["username"]
+            )
+
+            topic_name = (
+                event["topic_name"]
+                or "неизвестная тема"
+            )
+
+            formatted_events.append(
+                f"""
+Имя персонажа: {author}
+Тема: {topic_name}
+Тип события: {event["event_type"]}
+Текст поста:
+{event["text"]}
 """
+            )
+
+        source_text = "\n---\n".join(
+            formatted_events
         )
 
-    source_text = "\n---\n".join(formatted_events)
+        prompt = f"""
+Ты пишешь городскую новость для текстовой
+ролевой игры.
 
-    prompt = f"""
-Ты нарративный ИИ криминальной хроники альтернативного современного города.
+Мир — альтернативный современный город
+без магии и сверхъестественного.
 
-Твоя задача — создать одну короткую новость для ролевой игры
-на основе РЕАЛЬНЫХ событий, которые прислали игроки.
+Используй только события из переданных
+сообщений игроков.
 
-Не придумывай конкретные факты, которых нет в исходных сообщениях.
+Стиль проекта:
+{NEWS_STYLE}
 
-Можно объединить несколько сообщений в одну городскую новость.
+Правила:
 
-Особенно обращай внимание на:
-- драки;
-- конфликты;
-- сделки;
-- новые знакомства;
-- странные события;
-- активность игроков;
-- флуд, если из него видно интересное событие;
-- появление новых персонажей.
+- Пиши литературно, атмосферно и живо.
+- Используй детали города, свет, погоду,
+  звуки, запахи и контраст роскоши
+  с разрухой, если это подходит.
+- Объём — 2–4 коротких абзаца.
+- Не превращай текст в сухой список.
+- Не придумывай действия, которых нет
+  в исходных сообщениях.
+- Не управляй персонажами и не решай
+  за них, что они сделали после поста.
+- Не добавляй магию и сверхъестественное.
+- Не добавляй новых персонажей.
+- Не используй хэштеги.
+- Не используй Telegram ID.
+- Сохраняй имя персонажа и username
+  в формате: Имя персонажа (@username).
+- Если username отсутствует, используй
+  только имя персонажа.
+- Упомяни в тексте тех персонажей,
+  чьи действия важны для новости.
+- Не добавляй заголовок — его добавит бот.
 
-Если среди событий есть новая анкета, можно написать в стиле:
-"В городе появилась новая личность..."
-и обязательно использовать предоставленную ссылку на анкету.
-
-Стиль:
-- криминальная хроника;
-- альтернативная современность;
-- без магии;
-- атмосферно;
-- 2-4 предложения;
-- без выдумывания фактов.
-
-События:
+События игроков:
 
 {source_text}
 """
+    else:
+        import random
 
+        random_event = random.choice(
+            RANDOM_CITY_EVENTS
+        )
+
+        source_text = random_event
+
+        prompt = f"""
+Ты пишешь короткую городскую новость
+для текстовой ролевой игры.
+
+Мир — альтернативный современный город
+без магии и сверхъестественного.
+
+За последние шесть часов игроки ничего
+не написали, поэтому создай фоновое событие
+для города.
+
+Случайная основа события:
+{random_event}
+
+Стиль проекта:
+{NEWS_STYLE}
+
+Правила:
+
+- Напиши 2–3 литературных предложения.
+- Сделай событие атмосферным и правдоподобным.
+- Можно добавить место, время суток,
+  погоду, реакцию жителей или городские слухи.
+- Не связывай событие с игровыми персонажами.
+- Не добавляй магию и сверхъестественное.
+- Не используй хэштеги.
+- Не используй Telegram ID.
+- Не добавляй заголовок — его добавит бот.
+"""
+    
     result = await groq_request(
         [
             {
                 "role": "system",
                 "content": (
-                    "Ты нарративный ИИ ролевой игры. "
-                    "Создавай короткие городские новости "
-                    "только на основе переданных событий."
+                    "Ты литературный автор "
+                    "городской криминальной хроники. "
+                    "Пиши только текст новости."
                 )
             },
             {
@@ -1030,13 +1181,25 @@ async def generate_news_from_events():
     )
 
     if not result:
-        return None
+        return None, []
 
     try:
-        return result["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError):
-        logger.error("Не удалось получить текст новости.")
-        return None
+        news_text = (
+            result["choices"][0]["message"]
+            ["content"]
+            .strip()
+        )
+    except (
+        KeyError,
+        IndexError,
+        TypeError
+    ):
+        logger.error(
+            "Не удалось получить текст новости."
+        )
+        return None, []
+
+    return news_text, event_ids
 
 
 async def generate_events_loop():
@@ -1046,19 +1209,39 @@ async def generate_events_loop():
                 NEWS_INTERVAL_HOURS * 60 * 60
             )
 
-            news = await generate_news_from_events()
+            news_text, event_ids = (
+                await generate_news_from_events(
+                    hours=6
+                )
+            )
 
-            if not news:
+            if not news_text:
+                logger.info(
+                    "Новость не создана: "
+                    "ИИ не вернул текст."
+                )
                 continue
+
+            final_text = (
+                "📰 НОВОСТИ ГОРОДА\n\n"
+                + news_text
+            )
 
             await bot.send_message(
                 GROUP_ID_INT,
-                "📰 **НОВОСТИ ГОРОДА**\n\n" + news,
-                message_thread_id=STORY_TOPIC_ID_INT,
-                parse_mode="Markdown"
+                final_text,
+                message_thread_id=STORY_TOPIC_ID_INT
             )
 
-            logger.info("Новость опубликована.")
+            await mark_news_events_used(
+                event_ids
+            )
+
+            logger.info(
+                "Обычная новость опубликована. "
+                "Использовано событий: %s",
+                len(event_ids)
+            )
 
         except asyncio.CancelledError:
             raise
@@ -1067,7 +1250,6 @@ async def generate_events_loop():
             logger.exception(
                 "Ошибка фоновой генерации новостей."
             )
-
 
 # ============================================================
 # ОБРАБОТКА СТАТИСТИКИ
