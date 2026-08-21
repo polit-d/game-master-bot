@@ -324,8 +324,6 @@ async def init_database():
         """
     )
 
-    # Миграция для уже существующей базы: добавляем имя персонажа,
-    # если колонка ещё не была создана.
     await db_pool.execute(
         """
         ALTER TABLE players
@@ -347,7 +345,7 @@ async def init_database():
         """
     )
 
-   await db_pool.execute(
+    await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS processed_messages (
             message_id BIGINT PRIMARY KEY,
@@ -400,7 +398,9 @@ async def init_database():
         """
     )
 
-    logger.info("Таблицы PostgreSQL проверены/созданы.")
+    logger.info(
+        "Таблицы PostgreSQL проверены/созданы."
+    )
 
 
 async def get_player(user_id):
