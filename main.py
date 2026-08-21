@@ -347,12 +347,56 @@ async def init_database():
         """
     )
 
-    await db_pool.execute(
+   await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS processed_messages (
             message_id BIGINT PRIMARY KEY,
             processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+        """
+    )
+
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS news_events (
+            id BIGSERIAL PRIMARY KEY,
+
+            source_chat_id BIGINT NOT NULL,
+            telegram_message_id BIGINT NOT NULL,
+
+            user_id BIGINT,
+            character_name TEXT,
+            username TEXT,
+
+            event_type TEXT NOT NULL,
+            text TEXT NOT NULL,
+
+            topic_id INTEGER,
+            topic_name TEXT,
+            anketa_url TEXT,
+
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            used_in_news_at TIMESTAMPTZ
+        )
+        """
+    )
+
+    await db_pool.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        news_events_source_message_idx
+        ON news_events (
+            source_chat_id,
+            telegram_message_id
+        )
+        """
+    )
+
+    await db_pool.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        news_events_created_at_idx
+        ON news_events (created_at)
         """
     )
 
