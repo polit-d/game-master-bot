@@ -845,15 +845,45 @@ async def add_event_to_buffer(
     if not text:
         return
 
+    user_id = None
+    character_name = None
+
+    if message.from_user:
+        user_id = message.from_user.id
+
+    current_username = clean_username(username)
+
+    # Получаем имя персонажа из профиля.
+    # Если игрок ещё не зарегистрирован,
+    # имя останется пустым.
+    if user_id and db_pool:
+        player = await get_player(user_id)
+
+        if player:
+            character_name = player["character_name"]
+
+            # Берём актуальный username из профиля,
+            # если он есть.
+            if not current_username:
+                current_username = clean_username(
+                    player["username"]
+                )
+
+    topic_id = get_topic_id(message)
+    topic_name = get_topic_name(topic_id)
+
     event = {
         "type": event_type,
-        "username": clean_username(username),
-        "text": text[:2000],
+        "username": current_username,
+        "character_name": character_name,
+        "text": text[:4000],
         "anketa_url": anketa_url,
-        "topic": get_topic_name(get_topic_id(message)),
+        "topic": topic_name,
         "timestamp": now_utc().isoformat(),
     }
 
+    # Пока сохраняем событие и в старый временный буфер.
+    # Это позволит текущей системе новостей продолжить работать.
     async with event_buffer_lock:
         event_buffer.append(event)
 
@@ -861,6 +891,61 @@ async def add_event_to_buffer(
             del event_buffer[
                 :len(event_buffer) - MAX_EVENT_BUFFER
             ]
+
+    # Одновременно сохраняем событие в PostgreSQL.
+    # Повторное получение одного и того же сообщения
+    # не создаст дубликат.
+    await db_pool.execute(
+        """
+        INSERT INTO news_events (
+            source_chat_id,
+            telegram_message_id,
+            user_id,
+            character_name,
+            username,
+            event_type,
+            text,
+            topic_id,
+            topic_name,
+            anketa_url
+        )
+        VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            $8,
+            $9,
+            $10
+        )
+        ON CONFLICT (
+            source_chat_id,
+            telegram_message_id
+        )
+        DO NOTHING
+        """,
+        message.chat.id,
+        message.message_id,
+        user_id,
+        character_name,
+        current_username,
+        event_type,
+        text[:4000],
+        topic_id,
+        topic_name,
+        anketa_url
+    )
+
+    logger.info(
+        "Событие сохранено для новостей: "
+        "персонаж=%s, username=@%s, тема=%s",
+        character_name or "не указан",
+        current_username or "нет",
+        topic_name
+    )
 
 
 async def generate_news_from_events():
