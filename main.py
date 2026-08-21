@@ -10,7 +10,9 @@ import aiohttp
 from aiohttp import web
 import asyncpg
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 from dotenv import load_dotenv
 
@@ -117,6 +119,10 @@ except ValueError as exc:
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+
+class RegistrationState(StatesGroup):
+    waiting_for_character_name = State()
 
 
 # ============================================================
@@ -291,6 +297,7 @@ async def init_database():
         CREATE TABLE IF NOT EXISTS players (
             user_id BIGINT PRIMARY KEY,
             username TEXT,
+            character_name TEXT,
             str INTEGER NOT NULL DEFAULT 1,
             rep INTEGER NOT NULL DEFAULT 1,
             con INTEGER NOT NULL DEFAULT 1,
@@ -314,6 +321,15 @@ async def init_database():
 
             first_start_seen BOOLEAN NOT NULL DEFAULT FALSE
         )
+        """
+    )
+
+    # Миграция для уже существующей базы: добавляем имя персонажа,
+    # если колонка ещё не была создана.
+    await db_pool.execute(
+        """
+        ALTER TABLE players
+        ADD COLUMN IF NOT EXISTS character_name TEXT
         """
     )
 
@@ -373,6 +389,7 @@ async def get_player_by_username(username):
 async def register_player(
     user_id,
     username,
+    character_name,
     initial_stats=True
 ):
     existing = await get_player(user_id)
@@ -396,6 +413,7 @@ async def register_player(
         INSERT INTO players (
             user_id,
             username,
+            character_name,
             str,
             rep,
             con,
@@ -413,14 +431,16 @@ async def register_player(
             $5,
             $6,
             $7,
+            $8,
             'Игрок',
-            $7,
-            FALSE
+            $8,
+            TRUE
         )
         RETURNING *
         """,
         user_id,
         clean_username(username),
+        character_name,
         initial_str,
         initial_rep,
         initial_con,
@@ -432,31 +452,31 @@ async def register_player(
 
 
 async def ensure_registered(user_id, username):
+    """
+    Совместимый вспомогательный метод: теперь бот НЕ регистрирует
+    новых игроков автоматически. Регистрация выполняется только
+    через /start и имя персонажа.
+    """
     player = await get_player(user_id)
 
-    if player:
-        # Обновляем username, если он изменился.
-        current_username = clean_username(username)
+    if not player:
+        return None, False
 
-        if current_username and current_username != player["username"]:
-            player = await db_pool.fetchrow(
-                """
-                UPDATE players
-                SET username = $1
-                WHERE user_id = $2
-                RETURNING *
-                """,
-                current_username,
-                user_id
-            )
+    current_username = clean_username(username)
 
-        return player, False
+    if current_username and current_username != player["username"]:
+        player = await db_pool.fetchrow(
+            """
+            UPDATE players
+            SET username = $1
+            WHERE user_id = $2
+            RETURNING *
+            """,
+            current_username,
+            user_id
+        )
 
-    return await register_player(
-        user_id,
-        username,
-        initial_stats=True
-    )
+    return player, False
 
 
 # ============================================================
@@ -939,6 +959,16 @@ async def update_stats(
         )
         return
 
+    # Статы начисляются только уже зарегистрированным игрокам.
+    player = await get_player(user_id)
+
+    if not player:
+        logger.info(
+            "Игрок %s написал игровой пост, но ещё не зарегистрирован через /start.",
+            user_id
+        )
+        return
+
     # Проверяем, не обрабатывали ли это сообщение раньше.
     inserted = await db_pool.fetchval(
         """
@@ -960,14 +990,17 @@ async def update_stats(
         )
         return
 
-    player, created = await ensure_registered(
-        user_id,
-        username
-    )
-
-    if created:
-        logger.info(
-            "Игрок %s автоматически зарегистрирован.",
+    # Обновляем username, если игрок его поменял.
+    current_username = clean_username(username)
+    if current_username and current_username != player["username"]:
+        player = await db_pool.fetchrow(
+            """
+            UPDATE players
+            SET username = $1
+            WHERE user_id = $2
+            RETURNING *
+            """,
+            current_username,
             user_id
         )
 
@@ -1119,12 +1152,14 @@ async def build_profile_text(player):
     else:
         last_post_text = "Никогда"
 
-    # Username
+    # Имя персонажа и Telegram username
+    character_name = player["character_name"] or "Имя не указано"
     username = player["username"] or "без_username"
 
     # Экранируем данные пользователя,
     # чтобы специальные символы не ломали HTML Telegram
     safe_username = escape(str(username))
+    safe_character_name = escape(str(character_name))
     safe_status = escape(
         str(player["status"] or "Игрок")
     )
@@ -1144,7 +1179,8 @@ async def build_profile_text(player):
     text = (
         "📋 <b>ПРОФИЛЬ ИГРОКА</b>\n\n"
 
-        f"👤 <b>Имя:</b> @{safe_username}\n"
+        f"🎭 <b>Персонаж:</b> {safe_character_name}\n"
+        f"👤 <b>Telegram:</b> @{safe_username}\n"
         f"📝 <b>Анкета:</b> {anketa_text}\n\n"
 
         f"💪 <b>Сила (STR):</b> {player['str']} "
@@ -1182,20 +1218,42 @@ async def show_profile(message, player):
 # ============================================================
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(
+    message: Message,
+    state: FSMContext
+):
     user_id = message.from_user.id
     username = message.from_user.username
 
     player = await get_player(user_id)
 
-    newly_registered = False
-
+    # Новый игрок — сначала спрашиваем имя персонажа.
     if not player:
-        player, newly_registered = await register_player(
-            user_id,
-            username,
-            initial_stats=True
+        await state.set_state(
+            RegistrationState.waiting_for_character_name
         )
+
+        await message.answer(
+            "👋 Добро пожаловать в город!\n\n"
+            "🎭 Для начала регистрации напиши имя своего персонажа.\n\n"
+            "Например:\n"
+            "Виктор Кравцов\n\n"
+            "Это имя будет отображаться в твоём профиле."
+        )
+        return
+
+    # Если игрок уже был зарегистрирован старой версией бота,
+    # но имени персонажа ещё нет — тоже просим его указать.
+    if not player["character_name"]:
+        await state.set_state(
+            RegistrationState.waiting_for_character_name
+        )
+
+        await message.answer(
+            "🎭 У тебя уже есть игровой профиль, но имя персонажа ещё не указано.\n\n"
+            "Напиши имя персонажа, которое будет отображаться в профиле."
+        )
+        return
 
     await db_pool.execute(
         """
@@ -1209,33 +1267,57 @@ async def cmd_start(message: Message):
         user_id
     )
 
-    registration_text = ""
+    player = await get_player(user_id)
+    await state.clear()
+
+    await send_welcome_message(
+        message,
+        player,
+        newly_registered=False
+    )
+
+
+async def send_welcome_message(
+    message,
+    player,
+    newly_registered=False
+):
+    safe_rules_url = escape(
+        str(RULES_URL),
+        quote=True
+    )
 
     if newly_registered:
-        registration_text = """
-🎉 Ты зарегистрирован в игре!
+        registration_text = (
+            "🎉 <b>Ты зарегистрирован в игре!</b>\n\n"
+            "Твои стартовые характеристики:\n\n"
+            "💪 STR: 4\n"
+            "🌟 REP: 4\n"
+            "🤝 CON: 4\n"
+            "💰 MONEY: 500\n"
+        )
+    else:
+        registration_text = (
+            "Ты уже зарегистрирован в игре.\n"
+        )
 
-Твои стартовые характеристики:
-
-💪 STR: 4
-🌟 REP: 4
-🤝 CON: 4
-💰 MONEY: 500
-"""
-
-    rules_text = RULES_URL
+    safe_character_name = escape(
+        str(player["character_name"] or "Имя не указано")
+    )
 
     await message.answer(
         f"""
-👋 *Добро пожаловать в город!*
+👋 <b>Добро пожаловать в город!</b>
 
 Я бот статистики текстовой ролевой игры.
 
 {registration_text}
 
+🎭 <b>Имя персонажа:</b> {safe_character_name}
+
 Теперь твои игровые сообщения могут влиять на статистику.
 
-📋 *Основные команды:*
+📋 <b>Основные команды:</b>
 
 /start — регистрация и инструкция
 /profile — посмотреть свой профиль
@@ -1247,20 +1329,91 @@ async def cmd_start(message: Message):
 /random money @username — по MONEY
 
 📝 Для начисления статов бот анализирует сообщения
-длиной от *300 символов* в игровых темах.
+длиной от <b>300 символов</b> в игровых темах.
 
-📚 *Правила игры:*
-{rules_text}
+📚 <b>Правила игры:</b>
+<a href="{safe_rules_url}">Открыть правила</a>
 
 💡 После регистрации можешь сразу открыть:
-`/profile`
+<code>/profile</code>
 
 Чтобы добавить анкету:
-`/setanket https://t.me/...`
+<code>/setanket https://t.me/...</code>
 
 Приятной игры!
 """,
-        parse_mode="Markdown"
+        parse_mode="HTML"
+    )
+
+
+@dp.message(
+    StateFilter(
+        RegistrationState.waiting_for_character_name
+    )
+)
+async def process_character_name(
+    message: Message,
+    state: FSMContext
+):
+    character_name = (message.text or "").strip()
+
+    if not character_name:
+        await message.answer(
+            "❌ Я не вижу имени.\n\n"
+            "Напиши имя персонажа обычным текстом."
+        )
+        return
+
+    if len(character_name) < 2:
+        await message.answer(
+            "❌ Имя слишком короткое.\n\n"
+            "Минимальная длина — 2 символа."
+        )
+        return
+
+    if len(character_name) > 50:
+        await message.answer(
+            "❌ Имя слишком длинное.\n\n"
+            "Максимальная длина — 50 символов."
+        )
+        return
+
+    user_id = message.from_user.id
+    username = message.from_user.username
+    player = await get_player(user_id)
+
+    if player:
+        # Старый игрок без имени персонажа.
+        await db_pool.execute(
+            """
+            UPDATE players
+            SET
+                character_name = $1,
+                username = $2,
+                first_start_seen = TRUE
+            WHERE user_id = $3
+            """,
+            character_name,
+            clean_username(username),
+            user_id
+        )
+
+        player = await get_player(user_id)
+        created = False
+    else:
+        player, created = await register_player(
+            user_id=user_id,
+            username=username,
+            character_name=character_name,
+            initial_stats=True
+        )
+
+    await state.clear()
+
+    await send_welcome_message(
+        message,
+        player,
+        newly_registered=created
     )
 
 
@@ -1471,6 +1624,74 @@ vs
 # АДМИНСКИЕ КОМАНДЫ
 # ============================================================
 
+@dp.message(Command("setname"))
+async def cmd_setname(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("Недостаточно прав.")
+        return
+
+    args = (message.text or "").split(maxsplit=2)
+
+    if len(args) < 3:
+        await message.answer(
+            "Использование:\n"
+            "/setname @username Новое имя"
+        )
+        return
+
+    username = clean_username(args[1])
+    character_name = args[2].strip()
+
+    if not username:
+        await message.answer("❌ Не указан username игрока.")
+        return
+
+    if len(character_name) < 2:
+        await message.answer("❌ Имя слишком короткое.")
+        return
+
+    if len(character_name) > 50:
+        await message.answer(
+            "❌ Имя слишком длинное. Максимум 50 символов."
+        )
+        return
+
+    player = await get_player_by_username(username)
+
+    if not player:
+        await message.answer("❌ Игрок не найден.")
+        return
+
+    await db_pool.execute(
+        """
+        UPDATE players
+        SET character_name = $1
+        WHERE user_id = $2
+        """,
+        character_name,
+        player["user_id"]
+    )
+
+    await message.answer(
+        f"✅ Имя персонажа игрока @{escape(username)} изменено на:\n\n"
+        f"🎭 {escape(character_name)}",
+        parse_mode="HTML"
+    )
+
+    try:
+        await bot.send_message(
+            player["user_id"],
+            f"🎭 Администратор изменил имя твоего персонажа на:\n\n"
+            f"{escape(character_name)}",
+            parse_mode="HTML"
+        )
+    except Exception:
+        logger.exception(
+            "Не удалось уведомить игрока %s о смене имени.",
+            player["user_id"]
+        )
+
+
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     if not is_admin(message.from_user.id):
@@ -1655,12 +1876,14 @@ async def handle_profile_post(
 
     player = await get_player(user_id)
 
+    # Анкета не регистрирует игрока автоматически.
+    # Сначала игрок должен пройти /start и указать имя персонажа.
     if not player:
-        player, _ = await register_player(
-            user_id,
-            username,
-            initial_stats=True
+        logger.info(
+            "Анкета пользователя %s получена, но игрок ещё не зарегистрирован.",
+            user_id
         )
+        return
 
     # Ссылка на конкретный Telegram-пост.
     if message.chat.type in {
