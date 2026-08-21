@@ -1051,6 +1051,12 @@ async def generate_news_from_events(
 
     event_ids = []
 
+        period_phrase = (
+        "за последний час"
+        if hours == 1
+        else f"за последние {hours} часов"
+    )
+
     if events:
         formatted_events = []
 
@@ -1138,7 +1144,7 @@ async def generate_news_from_events(
 Мир — альтернативный современный город
 без магии и сверхъестественного.
 
-За последние шесть часов игроки ничего
+За период {period_phrase} игроки ничего
 не написали, поэтому создай фоновое событие
 для города.
 
@@ -1930,6 +1936,61 @@ vs
         parse_mode="Markdown"
     )
 
+# ============================================================
+# /NEWS — СРОЧНАЯ НОВОСТЬ
+# ============================================================
+
+@dp.message(Command("news"))
+async def cmd_news(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer(
+            "Недостаточно прав для публикации новостей."
+        )
+        return
+
+    await message.answer(
+        "⏳ Собираю события за последний час "
+        "и готовлю срочную новость..."
+    )
+
+    news_text, event_ids = (
+        await generate_news_from_events(
+            hours=1
+        )
+    )
+
+    if not news_text:
+        await message.answer(
+            "Не удалось создать новость. "
+            "Проверь логи Render."
+        )
+        return
+
+    final_text = (
+        "📰 СРОЧНЫЕ НОВОСТИ\n\n"
+        + news_text
+    )
+
+    await bot.send_message(
+        GROUP_ID_INT,
+        final_text,
+        message_thread_id=STORY_TOPIC_ID_INT
+    )
+
+    await mark_news_events_used(
+        event_ids
+    )
+
+    await message.answer(
+        "✅ Срочная новость опубликована "
+        "в теме «Повествование»."
+    )
+
+    logger.info(
+        "Срочная новость опубликована. "
+        "Использовано событий: %s",
+        len(event_ids)
+    )
 
 # ============================================================
 # АДМИНСКИЕ КОМАНДЫ
