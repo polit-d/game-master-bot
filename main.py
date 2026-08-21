@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import re
+from html import escape
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -1095,13 +1096,20 @@ async def build_profile_text(player):
         player["good_boy_count"]
     )
 
+    # Ссылка на анкету
     if player["anketa_url"]:
+        safe_anketa_url = escape(
+            str(player["anketa_url"]),
+            quote=True
+        )
+
         anketa_text = (
-            f"[Открыть анкету]({player['anketa_url']})"
+            f'<a href="{safe_anketa_url}">Открыть анкету</a>'
         )
     else:
         anketa_text = "Не заполнена"
 
+    # Дата последнего поста
     last_post = player["last_post"]
 
     if last_post:
@@ -1111,24 +1119,53 @@ async def build_profile_text(player):
     else:
         last_post_text = "Никогда"
 
+    # Username
     username = player["username"] or "без_username"
 
-    return f"""
-📋 *ПРОФИЛЬ ИГРОКА*
+    # Экранируем данные пользователя,
+    # чтобы специальные символы не ломали HTML Telegram
+    safe_username = escape(str(username))
+    safe_status = escape(
+        str(player["status"] or "Игрок")
+    )
 
-👤 Имя: @{username}
-📝 Анкета: {anketa_text}
+    safe_str_status = escape(str(str_status))
+    safe_rep_status = escape(str(rep_status))
+    safe_con_status = escape(str(con_status))
 
-💪 Сила (STR): {player["str"]} (ур. {str_level}, {str_status})
-🌟 Репутация (REP): {player["rep"]} (ур. {rep_level}, {rep_status})
-🤝 Связи (CON): {player["con"]} (ур. {con_level}, {con_status})
-💰 Кэш (MONEY): {player["money"]} монет
+    safe_badge = escape(
+        badge if badge else "Нет"
+    )
 
-🎯 Статус: {player["status"]}
-🏷 Пометка: {badge if badge else "Нет"}
+    safe_last_post_text = escape(
+        str(last_post_text)
+    )
 
-📅 Последний пост: {last_post_text}
-"""
+    text = (
+        "📋 <b>ПРОФИЛЬ ИГРОКА</b>\n\n"
+
+        f"👤 <b>Имя:</b> @{safe_username}\n"
+        f"📝 <b>Анкета:</b> {anketa_text}\n\n"
+
+        f"💪 <b>Сила (STR):</b> {player['str']} "
+        f"(ур. {str_level}, {safe_str_status})\n"
+
+        f"🌟 <b>Репутация (REP):</b> {player['rep']} "
+        f"(ур. {rep_level}, {safe_rep_status})\n"
+
+        f"🤝 <b>Связи (CON):</b> {player['con']} "
+        f"(ур. {con_level}, {safe_con_status})\n"
+
+        f"💰 <b>Кэш (MONEY):</b> {player['money']} монет\n\n"
+
+        f"🎯 <b>Статус:</b> {safe_status}\n"
+        f"🏷 <b>Пометка:</b> {safe_badge}\n\n"
+
+        f"📅 <b>Последний пост:</b> "
+        f"{safe_last_post_text}"
+    )
+
+    return text
 
 
 async def show_profile(message, player):
@@ -1136,7 +1173,7 @@ async def show_profile(message, player):
 
     await message.answer(
         text,
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
