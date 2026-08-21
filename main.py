@@ -1051,7 +1051,7 @@ async def generate_news_from_events(
 
     event_ids = []
 
-        period_phrase = (
+    period_phrase = (
         "за последний час"
         if hours == 1
         else f"за последние {hours} часов"
