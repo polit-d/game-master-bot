@@ -1054,6 +1054,87 @@ def format_news_character(
 
     return "персонаж без указанного имени"
 
+def build_grouped_news_source(events):
+    """
+    Группирует события по story_tag.
+    Порядок событий внутри каждой группы
+    сохраняется хронологический.
+    """
+    tagged_groups = {}
+    untagged_events = []
+
+    for event in events:
+        story_tag = (
+            event["story_tag"] or ""
+        ).strip().lower()
+
+        if story_tag:
+            tagged_groups.setdefault(
+                story_tag,
+                []
+            ).append(event)
+        else:
+            untagged_events.append(event)
+
+    blocks = []
+
+    for story_tag, group_events in tagged_groups.items():
+        lines = [
+            f"СЮЖЕТНЫЙ ТЕГ: {story_tag}"
+        ]
+
+        for event in group_events:
+            author = format_news_character(
+                event["character_name"],
+                event["username"]
+            )
+
+            topic_name = (
+                event["topic_name"]
+                or "Игровая тема"
+            )
+
+            lines.append(
+                f"Автор: {author}\n"
+                f"Тема: {topic_name}\n"
+                f"Тип события: {event['event_type']}\n"
+                f"Текст поста:\n{event['text']}"
+            )
+
+        blocks.append(
+            "\n---\n".join(lines)
+        )
+
+    if untagged_events:
+        lines = [
+            "СОБЫТИЯ БЕЗ СЮЖЕТНОГО ТЕГА:",
+            "Не объединяй их автоматически "
+            "с тегированными сюжетами."
+        ]
+
+        for event in untagged_events:
+            author = format_news_character(
+                event["character_name"],
+                event["username"]
+            )
+
+            topic_name = (
+                event["topic_name"]
+                or "Игровая тема"
+            )
+
+            lines.append(
+                f"Автор: {author}\n"
+                f"Тема: {topic_name}\n"
+                f"Тип события: {event['event_type']}\n"
+                f"Текст поста:\n{event['text']}"
+            )
+
+        blocks.append(
+            "\n---\n".join(lines)
+        )
+
+    return "\n\n==========\n\n".join(blocks)
 
 async def get_news_events(
     hours=6
