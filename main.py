@@ -964,7 +964,7 @@ async def add_event_to_buffer(
             text,
             topic_id,
             topic_name,
-            anketa_url
+            anketa_url,
             story_tag
         )
         VALUES (
@@ -995,7 +995,7 @@ async def add_event_to_buffer(
         text[:4000],
         topic_id,
         topic_name,
-        anketa_url
+        anketa_url,
         story_tag
     )
 
