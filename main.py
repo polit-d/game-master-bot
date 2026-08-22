@@ -263,7 +263,6 @@ def is_news_topic_source(message: Message):
     return get_topic_id(message) in {
         GAME_TOPIC_ID_INT,
         SEMI_RP_TOPIC_ID_INT,
-        FLOOD_TOPIC_ID_INT,
         PROFILES_TOPIC_ID_INT,
     }
 
@@ -1777,6 +1776,38 @@ async def cmd_profile(message: Message):
 
     await show_profile(message, player)
 
+# ============================================================
+# /HELP
+# ============================================================
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    help_text = (
+        "<b>🎮 КОМАНДЫ ИГРЫ</b>\n\n"
+        "/start — регистрация в игре\n"
+        "/profile — открыть свой профиль\n"
+        "/profile @username — открыть профиль игрока\n"
+        "/setanket ссылка — добавить ссылку на анкету\n"
+        "/random str @username — случайное сравнение STR\n"
+        "/random rep @username — случайное сравнение REP\n"
+        "/random con @username — случайное сравнение CON\n"
+        "/random money @username — случайное сравнение MONEY\n"
+    )
+
+    if is_admin(message.from_user.id):
+        help_text += (
+            "\n"
+            "<b>🔐 КОМАНДЫ АДМИНИСТРАТОРА</b>\n\n"
+            "/news — опубликовать срочную новость\n"
+            "/stats — показать статистику бота\n"
+            "/player @username — открыть профиль игрока\n"
+            "/setname @username Имя — изменить имя персонажа\n"
+        )
+
+    await message.answer(
+        help_text,
+        parse_mode="HTML"
+    )
 
 # ============================================================
 # /SETANKET
