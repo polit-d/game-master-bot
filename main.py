@@ -274,6 +274,29 @@ def is_ignored_topic(message: Message):
         STORY_TOPIC_ID_INT,
     }
 
+# ============================================================
+# ТЕГИ ИГРОВЫХ СЮЖЕТОВ
+# ============================================================
+
+STORY_TAG_PATTERN = re.compile(
+    r"(?<!\w)#([A-Za-zА-Яа-яЁё0-9_]+)"
+)
+
+
+def extract_story_tag(text):
+    """
+    Возвращает первый хэштег игрового сюжета
+    в нормализованном виде или None.
+    """
+    if not text:
+        return None
+
+    match = STORY_TAG_PATTERN.search(text)
+
+    if not match:
+        return None
+
+    return f"#{match.group(1).lower()}"
 
 def clean_username(username):
     if not username:
@@ -348,6 +371,13 @@ async def init_database():
         )
         """
     )
+
+    await db_pool.execute(
+    """
+    ALTER TABLE news_events
+    ADD COLUMN IF NOT EXISTS story_tag TEXT
+    """
+)
 
     await db_pool.execute(
         """
@@ -896,6 +926,7 @@ async def add_event_to_buffer(
 
     topic_id = get_topic_id(message)
     topic_name = get_topic_name(topic_id)
+    story_tag = extract_story_tag(text)
 
     event = {
         "type": event_type,
@@ -904,6 +935,7 @@ async def add_event_to_buffer(
         "text": text[:4000],
         "anketa_url": anketa_url,
         "topic": topic_name,
+        "story_tag": story_tag,
         "timestamp": now_utc().isoformat(),
     }
 
@@ -933,6 +965,7 @@ async def add_event_to_buffer(
             topic_id,
             topic_name,
             anketa_url
+            story_tag
         )
         VALUES (
             $1,
@@ -945,6 +978,7 @@ async def add_event_to_buffer(
             $8,
             $9,
             $10
+            $11
         )
         ON CONFLICT (
             source_chat_id,
@@ -962,14 +996,15 @@ async def add_event_to_buffer(
         topic_id,
         topic_name,
         anketa_url
+        story_tag
     )
 
     logger.info(
-        "Событие сохранено для новостей: "
-        "персонаж=%s, username=@%s, тема=%s",
-        character_name or "не указан",
-        current_username or "нет",
-        topic_name
+        "Событие сохранено: %s @%s тема=%s тег=%s",
+        character_name or "",
+        current_username or "",
+        topic_name,
+        story_tag or "без тега"
     )
 
 
@@ -1014,6 +1049,7 @@ async def get_news_events(
             topic_name,
             anketa_url,
             created_at
+            story_tag
         FROM news_events
         WHERE
             created_at >= $1
