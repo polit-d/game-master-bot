@@ -977,7 +977,7 @@ async def add_event_to_buffer(
             $7,
             $8,
             $9,
-            $10
+            $10,
             $11
         )
         ON CONFLICT (
