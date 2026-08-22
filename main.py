@@ -1019,10 +1019,15 @@ async def get_news_events(
         WHERE
             created_at >= $1
             AND used_in_news_at IS NULL
+            AND (
+                topic_id IS NULL
+                OR topic_id != $2
+            )
         ORDER BY created_at ASC
         LIMIT 300
         """,
-        cutoff
+        cutoff,
+        FLOOD_TOPIC_ID_INT
     )
 
 
@@ -2202,17 +2207,8 @@ async def handle_message(message: Message):
 
         if topic_id == FLOOD_TOPIC_ID_INT:
 
-            # Во флуде статы НЕ начисляются.
-
-            # Но сообщения могут использоваться
-            # как материал для городской хроники.
-            await add_event_to_buffer(
-                message,
-                event_type="Флуд",
-                text=text,
-                username=message.from_user.username
-            )
-
+            # Флуд не участвует в статистике
+            # и не используется для городских новостей.
             return
 
         # ----------------------------------------------------
