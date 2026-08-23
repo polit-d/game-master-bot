@@ -1171,6 +1171,36 @@ async def get_news_events(
         FLOOD_TOPIC_ID_INT
     )
 
+async def get_pending_news_events():
+    """
+    Возвращает все неиспользованные события
+    для восстановительной новости после запуска.
+    """
+    return await db_pool.fetch(
+        """
+        SELECT
+            id,
+            user_id,
+            character_name,
+            username,
+            event_type,
+            text,
+            topic_name,
+            anketa_url,
+            story_tag,
+            created_at
+        FROM news_events
+        WHERE
+            used_in_news_at IS NULL
+            AND (
+                topic_id IS NULL
+                OR topic_id != $1
+            )
+        ORDER BY created_at ASC
+        LIMIT 300
+        """,
+        FLOOD_TOPIC_ID_INT
+    )
 
 async def mark_news_events_used(
     event_ids
@@ -1188,10 +1218,16 @@ async def mark_news_events_used(
     )
 
 
-async def generate_news_from_events(hours=6):
-    events = await get_news_events(
-        hours=hours
-    )
+async def generate_news_from_events(
+    hours=6,
+    catch_up=False
+):
+    if catch_up:
+        events = await get_pending_news_events()
+    else:
+        events = await get_news_events(
+            hours=hours
+        )
 
     event_ids = []
 
@@ -1254,6 +1290,9 @@ async def generate_news_from_events(hours=6):
 {source_text}
 """
     else:
+        if catch_up:
+            return None, []
+
         import random
 
         random_event = random.choice(
@@ -1336,33 +1375,26 @@ async def generate_news_from_events(hours=6):
 
 
 async def generate_events_loop():
-    while True:
-        try:
-            await asyncio.sleep(
-                NEWS_INTERVAL_HOURS * 60 * 60
+    # Даём боту время принять накопившиеся
+    # сообщения после запуска polling.
+    try:
+        await asyncio.sleep(30)
+
+        newstext, event_ids = (
+            await generate_news_from_events(
+                catch_up=True
             )
+        )
 
-            news_text, event_ids = (
-                await generate_news_from_events(
-                    hours=6
-                )
-            )
-
-            if not news_text:
-                logger.info(
-                    "Новость не создана: "
-                    "ИИ не вернул текст."
-                )
-                continue
-
-            final_text = (
-                "📰 НОВОСТИ ГОРОДА\n\n"
-                + news_text
+        if newstext:
+            finaltext = (
+                "📰 НОВОСТИ ПОСЛЕ ВОССТАНОВЛЕНИЯ\n\n"
+                + newstext
             )
 
             await bot.send_message(
                 GROUP_ID_INT,
-                final_text,
+                finaltext,
                 message_thread_id=STORY_TOPIC_ID_INT
             )
 
@@ -1371,7 +1403,62 @@ async def generate_events_loop():
             )
 
             logger.info(
-                "Обычная новость опубликована. "
+                "Восстановительная новость опубликована. "
+                "Использовано событий: %s",
+                len(event_ids)
+            )
+        else:
+            logger.info(
+                "Неиспользованных событий "
+                "для восстановительной новости нет."
+            )
+
+    except asyncio.CancelledError:
+        raise
+
+    except Exception:
+        logger.exception(
+            "Ошибка восстановительной новости."
+        )
+
+    # После восстановительной попытки
+    # начинается обычный шестичасовой цикл.
+    while True:
+        try:
+            await asyncio.sleep(
+                NEWS_INTERVAL_HOURS * 60 * 60
+            )
+
+            newstext, event_ids = (
+                await generate_news_from_events(
+                    hours=6
+                )
+            )
+
+            if not newstext:
+                logger.info(
+                    "Автоматическая новость "
+                    "не была создана."
+                )
+                continue
+
+            finaltext = (
+                "📰 НОВОСТИ\n\n"
+                + newstext
+            )
+
+            await bot.send_message(
+                GROUP_ID_INT,
+                finaltext,
+                message_thread_id=STORY_TOPIC_ID_INT
+            )
+
+            await mark_news_events_used(
+                event_ids
+            )
+
+            logger.info(
+                "Автоматическая новость опубликована. "
                 "Использовано событий: %s",
                 len(event_ids)
             )
@@ -1381,7 +1468,7 @@ async def generate_events_loop():
 
         except Exception:
             logger.exception(
-                "Ошибка фоновой генерации новостей."
+                "Ошибка автоматической генерации новостей."
             )
 
 # ============================================================
