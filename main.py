@@ -2437,34 +2437,30 @@ async def handle_message(message: Message):
         # ----------------------------------------------------
 
         if topic_id in {
-    GAME_TOPIC_ID_INT,
-    SEMI_RP_TOPIC_ID_INT
-}:
+            GAME_TOPIC_ID_INT,
+            SEMI_RP_TOPIC_ID_INT
+        }:
+            await mark_player_active(
+                user_id=message.from_user.id
+            )
 
-    # Любой игровой пост считается активностью.
-    # Анализ Groq и начисление статов зависят
-    # от длины текста отдельно.
-    await mark_player_active(
-        user_id=message.from_user.id
-    )
+            if len(text) >= MIN_TEXT_FOR_STATS:
+                await update_stats(
+                    user_id=message.from_user.id,
+                    username=message.from_user.username,
+                    text=text,
+                    message_id=message.message_id,
+                    topic_id=topic_id
+                )
 
-    if len(text) >= MIN_TEXT_FOR_STATS:
-        await update_stats(
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            text=text,
-            message_id=message.message_id,
-            topic_id=topic_id
-        )
+            await add_event_to_buffer(
+                message,
+                event_type="Игровое событие",
+                text=text,
+                username=message.from_user.username
+            )
 
-    await add_event_to_buffer(
-        message,
-        event_type="Игровое событие",
-        text=text,
-        username=message.from_user.username
-    )
-
-    return
+            return
 
         # ----------------------------------------------------
         # ФЛУД
