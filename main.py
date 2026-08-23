@@ -1387,6 +1387,26 @@ async def generate_events_loop():
 # ============================================================
 # ОБРАБОТКА СТАТИСТИКИ
 # ============================================================
+async def mark_player_active(user_id):
+    """
+    Обновляет активность игрока без анализа текста.
+    Работает для любого поста в игровой теме.
+    """
+    await db_pool.execute(
+        """
+        UPDATE players
+        SET
+            last_post = $1,
+            status = CASE
+                WHEN status = 'Читатель'
+                THEN 'Игрок'
+                ELSE status
+            END
+        WHERE user_id = $2
+        """,
+        now_utc(),
+        user_id
+    )
 
 async def update_stats(
     user_id,
@@ -2330,30 +2350,34 @@ async def handle_message(message: Message):
         # ----------------------------------------------------
 
         if topic_id in {
-            GAME_TOPIC_ID_INT,
-            SEMI_RP_TOPIC_ID_INT
-        }:
+    GAME_TOPIC_ID_INT,
+    SEMI_RP_TOPIC_ID_INT
+}:
 
-            # Статы считаются только из сообщений
-            # длиной от 300 символов.
-            if len(text) >= MIN_TEXT_FOR_STATS:
-                await update_stats(
-                    user_id=message.from_user.id,
-                    username=message.from_user.username,
-                    text=text,
-                    message_id=message.message_id,
-                    topic_id=topic_id
-                )
+    # Любой игровой пост считается активностью.
+    # Анализ Groq и начисление статов зависят
+    # от длины текста отдельно.
+    await mark_player_active(
+        user_id=message.from_user.id
+    )
 
-            # А новости могут использовать и короткие сообщения.
-            await add_event_to_buffer(
-                message,
-                event_type="Игровое событие",
-                text=text,
-                username=message.from_user.username
-            )
+    if len(text) >= MIN_TEXT_FOR_STATS:
+        await update_stats(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            text=text,
+            message_id=message.message_id,
+            topic_id=topic_id
+        )
 
-            return
+    await add_event_to_buffer(
+        message,
+        event_type="Игровое событие",
+        text=text,
+        username=message.from_user.username
+    )
+
+    return
 
         # ----------------------------------------------------
         # ФЛУД
