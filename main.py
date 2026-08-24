@@ -229,6 +229,34 @@ async def init_database() -> None:
         """
     )
     await normalize_players_schema()
+    
+        await db_pool.execute(
+        """
+        DO $$
+        DECLARE column_type TEXT;
+        BEGIN
+            SELECT data_type
+            INTO column_type
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'players'
+              AND column_name = 'lastpost';
+
+            IF column_type IN ('text', 'character varying') THEN
+                ALTER TABLE players
+                ALTER COLUMN lastpost TYPE TIMESTAMPTZ
+                USING CASE
+                    WHEN lastpost IS NULL OR btrim(lastpost) = '' THEN NULL
+                    WHEN lastpost ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+                        THEN lastpost::TIMESTAMPTZ
+                    ELSE NULL
+                END;
+            END IF;
+        END
+        $$;
+        """
+    )
+
     for statement in (
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS charactername TEXT",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS firststartseen BOOLEAN NOT NULL DEFAULT FALSE",
