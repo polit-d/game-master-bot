@@ -806,6 +806,8 @@ async def profile_text(player: Any) -> str:
     return "\n".join(lines)
 
 
+
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     player = await get_player(message.from_user.id)
@@ -816,6 +818,61 @@ async def cmd_start(message: Message, state: FSMContext):
     player = await update_username(player, message.from_user.username)
     await message.answer(f"С возвращением, <b>{escape(str(player['charactername']))}</b>!", parse_mode="HTML")
 
+
+
+
+@dp.message()
+async def handle_group_message(message: Message, state: FSMContext):
+    """
+    First-line handler for RP text posts.
+
+    Only the three configured RP topics are stored. Registration is NOT
+    required to store the event; registration is checked later for news/stats.
+    """
+    current_topic = topic_id(message)
+
+    logger.info(
+        "INCOMING RP TEXT | chat=%s | user=%s | message=%s | "
+        "topic=%s | thread=%s | is_topic=%s",
+        message.chat.id,
+        message.from_user.id if message.from_user else None,
+        message.message_id,
+        current_topic,
+        message.message_thread_id,
+        message.is_topic_message,
+    )
+
+    allowed_topics = {GAME_TOPIC_ID, SEMI_TOPIC_ID, PROFILES_TOPIC_ID}
+
+    if current_topic not in allowed_topics:
+        logger.info(
+            "POST IGNORED | reason=topic | topic=%s | allowed=%s | message=%s",
+            current_topic,
+            sorted(allowed_topics),
+            message.message_id,
+        )
+        return
+
+    player = await get_player(message.from_user.id) if message.from_user else None
+
+    if player:
+        await mark_active(message.from_user.id)
+
+    try:
+        await add_event(message, message.text)
+        logger.info(
+            "POST STORED | registered=%s | topic=%s | message=%s",
+            bool(player),
+            current_topic,
+            message.message_id,
+        )
+    except Exception:
+        logger.exception(
+            "POST STORE FAILED | topic=%s | message=%s | user=%s",
+            current_topic,
+            message.message_id,
+            message.from_user.id if message.from_user else None,
+        )
 
 @dp.message(StateFilter(RegistrationState.waiting_for_character_name))
 async def process_name(message: Message, state: FSMContext):
@@ -1010,61 +1067,6 @@ async def cmd_news(message: Message):
         )
 
 
-@dp.message(
-    F.chat.id == GROUP_ID,
-    F.text,
-)
-async def handle_group_message(message: Message, state: FSMContext):
-    """
-    First-line handler for RP text posts.
-
-    Only the three configured RP topics are stored. Registration is NOT
-    required to store the event; registration is checked later for news/stats.
-    """
-    current_topic = topic_id(message)
-
-    logger.info(
-        "INCOMING RP TEXT | chat=%s | user=%s | message=%s | "
-        "topic=%s | thread=%s | is_topic=%s",
-        message.chat.id,
-        message.from_user.id if message.from_user else None,
-        message.message_id,
-        current_topic,
-        message.message_thread_id,
-        message.is_topic_message,
-    )
-
-    allowed_topics = {GAME_TOPIC_ID, SEMI_TOPIC_ID, PROFILES_TOPIC_ID}
-
-    if current_topic not in allowed_topics:
-        logger.info(
-            "POST IGNORED | reason=topic | topic=%s | allowed=%s | message=%s",
-            current_topic,
-            sorted(allowed_topics),
-            message.message_id,
-        )
-        return
-
-    player = await get_player(message.from_user.id) if message.from_user else None
-
-    if player:
-        await mark_active(message.from_user.id)
-
-    try:
-        await add_event(message, message.text)
-        logger.info(
-            "POST STORED | registered=%s | topic=%s | message=%s",
-            bool(player),
-            current_topic,
-            message.message_id,
-        )
-    except Exception:
-        logger.exception(
-            "POST STORE FAILED | topic=%s | message=%s | user=%s",
-            current_topic,
-            message.message_id,
-            message.from_user.id if message.from_user else None,
-        )
 
 
 async def health(request: web.Request):
