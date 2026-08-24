@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 from datetime import date, datetime, timedelta, timezone
 from html import escape
@@ -19,74 +20,61 @@ from aiogram.types import Message
 from dotenv import load_dotenv
 
 load_dotenv()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("galo_bot")
-
 MSK = ZoneInfo("Europe/Moscow")
 UTC = timezone.utc
 
 
-def env(name: str, default: str | None = None) -> str | None:
-    return os.getenv(name) or default
+def env(name: str, old: str | None = None, default: str | None = None) -> str | None:
+    value = os.getenv(name)
+    if value is None and old:
+        value = os.getenv(old)
+    return value if value is not None else default
 
 
-def env_int(name: str, default: int = 0) -> int:
-    value = env(name)
+def env_int(name: str, old: str | None = None, default: int = 0) -> int:
+    value = env(name, old)
     try:
         return int(value) if value is not None else default
     except ValueError:
         return default
 
 
-BOT_TOKEN = env("BOTTOKEN", env("BOT_TOKEN"))
-DATABASE_URL = env("DATABASEURL", env("DATABASE_URL"))
-GROQ_API_KEY = env("GROQAPIKEY", env("GROQ_API_KEY"))
-GROQ_MODEL = env("GROQMODEL", "llama-3.3-70b-versatile")
-GROQ_STRUCTURED_MODEL = env("GROQSTRUCTUREDMODEL", "openai/gpt-oss-20b")
-
-GROUP_ID = env_int("GROUP_ID", env_int("GROUPID"))
-GAME_TOPIC_ID = env_int("GAME_TOPIC_ID", env_int("GAMETOPICID"))
-SEMI_TOPIC_ID = env_int("SEMI_RP_TOPIC_ID", env_int("SEMIRPTOPICID"))
-INFO_TOPIC_ID = env_int("INFO_TOPIC_ID", env_int("INFOTOPICID"))
-ADMIN_TOPIC_ID = env_int("ADMIN_TOPIC_ID", env_int("ADMINTOPICID"))
-PROFILES_TOPIC_ID = env_int("PROFILES_TOPIC_ID", env_int("PROFILESTOPICID"))
-FLOOD_TOPIC_ID = env_int("FLOOD_TOPIC_ID", env_int("FLOODTOPICID"))
-STORY_TOPIC_ID = env_int("STORY_TOPIC_ID", env_int("STORYTOPICID"))
-RULES_URL = env("RULES_URL", env("RULESURL", ""))
-PORT = env_int("PORT", 10000)
-
+BOT_TOKEN = env("BOT_TOKEN", "BOTTOKEN")
+DATABASE_URL = env("DATABASE_URL", "DATABASEURL")
+GROQ_API_KEY = env("GROQ_API_KEY", "GROQAPIKEY")
+GROQ_MODEL = env("GROQ_MODEL", "GROQMODEL", "llama-3.3-70b-versatile")
+GROQ_STRUCTURED_MODEL = env("GROQ_STRUCTURED_MODEL", "GROQSTRUCTUREDMODEL", "openai/gpt-oss-20b")
+GROUP_ID = env_int("GROUP_ID", "GROUPID")
+GAME_TOPIC_ID = env_int("GAME_TOPIC_ID", "GAMETOPICID")
+SEMI_TOPIC_ID = env_int("SEMI_RP_TOPIC_ID", "SEMIRPTOPICID")
+INFO_TOPIC_ID = env_int("INFO_TOPIC_ID", "INFOTOPICID")
+ADMIN_TOPIC_ID = env_int("ADMIN_TOPIC_ID", "ADMINTOPICID")
+PROFILES_TOPIC_ID = env_int("PROFILES_TOPIC_ID", "PROFILESTOPICID")
+FLOOD_TOPIC_ID = env_int("FLOOD_TOPIC_ID", "FLOODTOPICID")
+STORY_TOPIC_ID = env_int("STORY_TOPIC_ID", "STORYTOPICID")
+RULES_URL = env("RULES_URL", "RULESURL", "")
+NEWS_STYLE = env("NEWS_STYLE", "NEWSSTYLE", "") or ""
+PORT = env_int("PORT", default=10000)
 ADMIN_IDS = {
-    int(item.strip())
-    for item in (env("ADMIN_IDS", env("ADMINIDS", "")) or "").split(",")
-    if item.strip().lstrip("-").isdigit()
+    int(x.strip())
+    for x in (env("ADMIN_IDS", "ADMINIDS", "") or "").split(",")
+    if x.strip().lstrip("-").isdigit()
 }
 
-NEWS_INTERVAL_HOURS = 6
-INACTIVITY_DAYS = 30
-MIN_TEXT_FOR_STATS = 300
-MAX_EVENT_TEXT = 4000
-WEEK_STR_CAP = 3
-WEEK_REP_CAP = 7
-WEEK_CON_CAP = 8
-WEEK_CASH_CAP = 1000
-
 if not BOT_TOKEN:
-    raise RuntimeError("Не задан BOTTOKEN или BOT_TOKEN")
+    raise RuntimeError("Не задан BOT_TOKEN")
 if not DATABASE_URL:
-    raise RuntimeError("Не задан DATABASEURL или DATABASE_URL")
+    raise RuntimeError("Не задан DATABASE_URL")
 if not GROQ_API_KEY:
-    raise RuntimeError("Не задан GROQAPIKEY или GROQ_API_KEY")
+    raise RuntimeError("Не задан GROQ_API_KEY")
 if not GROUP_ID:
-    raise RuntimeError("Не задан GROUPID")
+    raise RuntimeError("Не задан GROUP_ID")
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 db_pool: asyncpg.Pool | None = None
-
 
 class RegistrationState(StatesGroup):
     waiting_for_character_name = State()
@@ -100,28 +88,11 @@ def now_msk() -> datetime:
     return datetime.now(MSK)
 
 
-def clean_username(username: str | None) -> str | None:
-    if not username:
+def clean_username(value: str | None) -> str | None:
+    if not value:
         return None
-    value = username.strip().lstrip("@").strip()
+    value = value.strip().lstrip("@").strip()
     return value or None
-
-
-def display_name(player: Any) -> str:
-    character = str(player["charactername"] or "").strip()
-    username = clean_username(player["username"])
-    if character and username:
-        return f"{character} (@{username})"
-    if character:
-        return character
-    if username:
-        return f"@{username}"
-    return str(player["userid"])
-
-
-def profile_link(username: str | None) -> str | None:
-    username = clean_username(username)
-    return f"https://t.me/{username}" if username else None
 
 
 def safe_int(value: Any, default: int = 0) -> int:
@@ -129,45 +100,6 @@ def safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-def topic_id(message: Message) -> int:
-    return safe_int(message.message_thread_id, 0)
-
-
-def topic_name(value: int) -> str:
-    names = {
-        GAME_TOPIC_ID: "игровой",
-        SEMI_TOPIC_ID: "полуигровой",
-        INFO_TOPIC_ID: "информационный",
-        ADMIN_TOPIC_ID: "админский",
-        PROFILES_TOPIC_ID: "профили",
-        FLOOD_TOPIC_ID: "флуд",
-        STORY_TOPIC_ID: "сюжет",
-    }
-    return names.get(value, f"тема {value}")
-
-
-def is_admin(user_id: int | None) -> bool:
-    return bool(user_id in ADMIN_IDS)
-
-
-def is_event_topic(value: int) -> bool:
-    return value in {GAME_TOPIC_ID, SEMI_TOPIC_ID, PROFILES_TOPIC_ID}
-
-
-def is_ignored_topic(value: int) -> bool:
-    return value in {INFO_TOPIC_ID, ADMIN_TOPIC_ID, FLOOD_TOPIC_ID, STORY_TOPIC_ID}
-
-
-STORY_TAG_RE = re.compile(r"(?<!\w)#([A-Za-zА-Яа-яЁё0-9_-]+)")
-
-
-def extract_story_tag(text: str | None) -> str | None:
-    if not text:
-        return None
-    match = STORY_TAG_RE.search(text)
-    return match.group(1).lower() if match else None
 
 
 def rget(row: Any, key: str, default: Any = None) -> Any:
@@ -180,23 +112,94 @@ def rget(row: Any, key: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
-async def create_database_pool() -> None:
+def topic_id(message: Message) -> int:
+    return safe_int(message.message_thread_id)
+
+
+def topic_name(value: int) -> str:
+    return {
+        GAME_TOPIC_ID: "игровой",
+        SEMI_TOPIC_ID: "полуигровой",
+        INFO_TOPIC_ID: "информационный",
+        ADMIN_TOPIC_ID: "админский",
+        PROFILES_TOPIC_ID: "профили",
+        FLOOD_TOPIC_ID: "флуд",
+        STORY_TOPIC_ID: "сюжет",
+    }.get(value, f"тема {value}")
+
+
+def is_admin(user_id: int | None) -> bool:
+    return user_id in ADMIN_IDS
+
+
+def display_name(row: Any) -> str:
+    character = str(rget(row, "charactername", "") or "").strip()
+    username = clean_username(rget(row, "username"))
+    if character and username:
+        return f"{character} (@{username})"
+    return character or (f"@{username}" if username else str(rget(row, "userid", "игрок")))
+
+
+TAG_RE = re.compile(r"(?<!\w)#([A-Za-zА-Яа-яЁё0-9_-]+)")
+
+
+def story_tag(text: str | None) -> str | None:
+    match = TAG_RE.search(text or "")
+    return match.group(1).lower() if match else None
+
+
+async def create_pool() -> None:
     global db_pool
-    db_pool = await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=1,
-        max_size=5,
-        command_timeout=60,
-    )
+    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5, command_timeout=90)
     logger.info("PostgreSQL pool created")
 
 
-async def close_database_pool() -> None:
+async def close_pool() -> None:
     global db_pool
     if db_pool:
         await db_pool.close()
         db_pool = None
-        logger.info("PostgreSQL pool closed")
+
+
+async def normalize_players_schema() -> None:
+    assert db_pool is not None
+    columns = {
+        row["column_name"]
+        for row in await db_pool.fetch(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'players'
+            """
+        )
+    }
+    if "userid" not in columns:
+        if "user_id" in columns:
+            await db_pool.execute("ALTER TABLE players RENAME COLUMN user_id TO userid")
+        elif "telegram_id" in columns:
+            await db_pool.execute("ALTER TABLE players RENAME COLUMN telegram_id TO userid")
+        elif "id" in columns:
+            await db_pool.execute("ALTER TABLE players ADD COLUMN userid BIGINT")
+            await db_pool.execute("UPDATE players SET userid = id WHERE userid IS NULL")
+        else:
+            raise RuntimeError(f"В таблице players нет идентификатора игрока. Колонки: {sorted(columns)}")
+    aliases = {
+        "character_name": "charactername",
+        "last_post": "lastpost",
+        "anketa_url": "anketaurl",
+        "bad_boy_count": "badboycount",
+        "good_boy_count": "goodboycount",
+    }
+    for old, new in aliases.items():
+        columns = {
+            row["column_name"]
+            for row in await db_pool.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='players'"
+            )
+        }
+        if new not in columns:
+            await db_pool.execute(f"ALTER TABLE players ADD COLUMN {new} TEXT")
+            if old in columns:
+                await db_pool.execute(f"UPDATE players SET {new} = {old} WHERE {new} IS NULL")
 
 
 async def init_database() -> None:
@@ -221,20 +224,12 @@ async def init_database() -> None:
             conweeklimit INTEGER NOT NULL DEFAULT 0,
             moneyweeklimit INTEGER NOT NULL DEFAULT 0,
             weekreset TIMESTAMPTZ,
-            firststartseen BOOLEAN NOT NULL DEFAULT FALSE,
-            cash INTEGER,
-            activitystatus TEXT NOT NULL DEFAULT 'reader',
-            cashstatus TEXT NOT NULL DEFAULT 'normal',
-            repgame INTEGER NOT NULL DEFAULT 0,
-            repcommunity INTEGER NOT NULL DEFAULT 0,
-            admintitle TEXT,
-            businessname TEXT,
-            businesssalary INTEGER NOT NULL DEFAULT 0,
-            physicalpotential INTEGER NOT NULL DEFAULT 1
+            firststartseen BOOLEAN NOT NULL DEFAULT FALSE
         )
         """
     )
-    migrations = [
+    await normalize_players_schema()
+    for statement in (
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS charactername TEXT",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS cash INTEGER",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS activitystatus TEXT NOT NULL DEFAULT 'reader'",
@@ -245,12 +240,9 @@ async def init_database() -> None:
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS businessname TEXT",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS businesssalary INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS physicalpotential INTEGER NOT NULL DEFAULT 1",
-        "ALTER TABLE players ALTER COLUMN cash SET DEFAULT 100",
         "UPDATE players SET cash = COALESCE(cash, money, 100) WHERE cash IS NULL",
-    ]
-    for statement in migrations:
+    ):
         await db_pool.execute(statement)
-
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS actions (
@@ -264,14 +256,7 @@ async def init_database() -> None:
         )
         """
     )
-    await db_pool.execute(
-        """
-        CREATE TABLE IF NOT EXISTS processedmessages (
-            messageid BIGINT PRIMARY KEY,
-            processedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        """
-    )
+    await db_pool.execute("CREATE TABLE IF NOT EXISTS processedmessages (messageid BIGINT PRIMARY KEY, processedat TIMESTAMPTZ NOT NULL DEFAULT NOW())")
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS newsevents (
@@ -295,17 +280,13 @@ async def init_database() -> None:
     )
     await db_pool.execute("ALTER TABLE newsevents ADD COLUMN IF NOT EXISTS storytag TEXT")
     await db_pool.execute("ALTER TABLE newsevents ADD COLUMN IF NOT EXISTS statsprocessedat TIMESTAMPTZ")
-    await db_pool.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS newsevents_source_message_idx
-        ON newsevents(sourcechatid, telegrammessageid)
-        """
-    )
+    await db_pool.execute("CREATE UNIQUE INDEX IF NOT EXISTS newsevents_source_message_idx ON newsevents(sourcechatid, telegrammessageid)")
+    # Эти таблицы намеренно не используют внешние ключи: старые версии базы имели разные имена ключей.
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS daily_progress (
             id BIGSERIAL PRIMARY KEY,
-            userid BIGINT NOT NULL REFERENCES players(userid) ON DELETE CASCADE,
+            userid BIGINT NOT NULL,
             progressdate DATE NOT NULL,
             posts_count INTEGER NOT NULL DEFAULT 0,
             text_chars INTEGER NOT NULL DEFAULT 0,
@@ -325,7 +306,7 @@ async def init_database() -> None:
         """
         CREATE TABLE IF NOT EXISTS economy_ledger (
             id BIGSERIAL PRIMARY KEY,
-            userid BIGINT NOT NULL REFERENCES players(userid) ON DELETE CASCADE,
+            userid BIGINT NOT NULL,
             amount INTEGER NOT NULL,
             reason TEXT NOT NULL,
             progressdate DATE,
@@ -336,7 +317,7 @@ async def init_database() -> None:
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS player_achievements (
-            userid BIGINT NOT NULL REFERENCES players(userid) ON DELETE CASCADE,
+            userid BIGINT NOT NULL,
             achievement TEXT NOT NULL,
             count INTEGER NOT NULL DEFAULT 0,
             updatedat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -359,153 +340,98 @@ async def init_database() -> None:
 
 
 async def get_player(user_id: int):
-    assert db_pool is not None
-    return await db_pool.fetchrow("SELECT * FROM players WHERE userid = $1", user_id)
+    return await db_pool.fetchrow("SELECT * FROM players WHERE userid=$1", user_id)
 
 
 async def get_player_by_username(username: str | None):
-    assert db_pool is not None
     username = clean_username(username)
     if not username:
         return None
-    return await db_pool.fetchrow(
-        "SELECT * FROM players WHERE LOWER(username) = LOWER($1) LIMIT 1",
-        username,
-    )
+    return await db_pool.fetchrow("SELECT * FROM players WHERE LOWER(username)=LOWER($1) LIMIT 1", username)
 
 
-async def register_player(
-    user_id: int,
-    username: str | None,
-    character_name: str,
-    initial_stats: bool = True,
-):
-    assert db_pool is not None
+async def register_player(user_id: int, username: str | None, character: str):
     existing = await get_player(user_id)
     if existing:
         return existing, False
-
-    initial = (4, 4, 4, 500) if initial_stats else (1, 1, 1, 100)
     return await db_pool.fetchrow(
         """
-        INSERT INTO players(
-            userid, username, charactername, str, rep, con, money, cash,
-            lastpost, status, weekreset, firststartseen, activitystatus
-        )
-        VALUES($1, $2, $3, $4, $5, $6, $7, $7, $8, '', $8, TRUE, 'active')
-        RETURNING *
+        INSERT INTO players(userid, username, charactername, str, rep, con, money, cash, lastpost, weekreset, firststartseen, activitystatus)
+        VALUES($1,$2,$3,4,4,4,500,500,$4,$4,TRUE,'active') RETURNING *
         """,
-        user_id,
-        clean_username(username),
-        character_name,
-        initial[0],
-        initial[1],
-        initial[2],
-        initial[3],
-        now_utc(),
+        user_id, clean_username(username), character, now_utc(),
     ), True
 
 
-async def ensure_player(user_id: int, username: str | None):
-    player = await get_player(user_id)
-    if not player:
-        return None, False
-    current = clean_username(username)
-    if current and current != clean_username(rget(player, "username")):
-        assert db_pool is not None
-        player = await db_pool.fetchrow(
-            "UPDATE players SET username = $1 WHERE userid = $2 RETURNING *",
-            current,
-            user_id,
-        )
-    return player, False
+async def update_username(player: Any, username: str | None):
+    username = clean_username(username)
+    if username and username != clean_username(rget(player, "username")):
+        return await db_pool.fetchrow("UPDATE players SET username=$1 WHERE userid=$2 RETURNING *", username, player["userid"])
+    return player
 
 
-async def reset_week_if_needed(player):
-    assert db_pool is not None
-    reset = rget(player, "weekreset")
-    if reset is None or now_utc() - reset >= timedelta(days=7):
+async def reset_week(player: Any):
+    stamp = rget(player, "weekreset")
+    if stamp is None or now_utc() - stamp >= timedelta(days=7):
         return await db_pool.fetchrow(
             """
-            UPDATE players
-            SET strweeklimit = 0, repweeklimit = 0, conweeklimit = 0,
-                moneyweeklimit = 0, weekreset = $1
-            WHERE userid = $2
-            RETURNING *
+            UPDATE players SET strweeklimit=0, repweeklimit=0, conweeklimit=0, moneyweeklimit=0, weekreset=$1
+            WHERE userid=$2 RETURNING *
             """,
-            now_utc(),
-            player["userid"],
+            now_utc(), player["userid"],
         )
     return player
 
 
-async def groq_request(messages: list[dict[str, str]], model: str, temperature: float):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {"model": model, "messages": messages, "temperature": temperature}
-    timeout = aiohttp.ClientTimeout(total=90)
+async def groq(messages: list[dict[str, str]], model: str, temperature: float):
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, headers=headers, json=payload) as response:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as session:
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={"model": model, "messages": messages, "temperature": temperature},
+            ) as response:
                 raw = await response.text()
                 if response.status != 200:
-                    logger.error("Groq error %s: %s", response.status, raw[:1000])
+                    logger.error("Groq %s: %s", response.status, raw[:500])
                     return None
                 return json.loads(raw)
-    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
+    except Exception as exc:
         logger.error("Groq request failed: %s", exc)
         return None
-    except Exception:
-        logger.exception("Unexpected Groq error")
-        return None
 
 
-def extract_json(text: str | None) -> dict | None:
+def json_object(text: str | None) -> dict:
     if not text:
-        return None
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I)
+        return {}
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I)
     try:
-        value = json.loads(cleaned)
-        return value if isinstance(value, dict) else None
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, flags=re.S)
+        match = re.search(r"\{.*\}", text, re.S)
         if not match:
-            return None
+            return {}
         try:
             value = json.loads(match.group(0))
-            return value if isinstance(value, dict) else None
+            return value if isinstance(value, dict) else {}
         except json.JSONDecodeError:
-            return None
+            return {}
 
 
-async def analyze_daily_material(material: str) -> dict[str, int]:
-    system = (
-        "Ты анализируешь дневной игровой материал на русском языке. "
-        "Верни только JSON без markdown: "
-        '{"str":0,"rep":0,"con":0,"cash":0,"goodboy":0,"badboy":0}. '
-        "STR, REP и CON могут быть только от 0 до 2. CASH — от 0 до 10. "
-        "goodboy и badboy — только 0 или 1. Не начисляй статы за пустой флуд."
-    )
-    prompt = "Дневной материал игроков:\n\n" + material[:20000]
-    result = await groq_request(
+async def analyze(material: str) -> dict[str, int]:
+    result = await groq(
         [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "Верни только JSON: {\"str\":0,\"rep\":0,\"con\":0,\"cash\":0,\"goodboy\":0,\"badboy\":0}. STR/REP/CON от 0 до 2, CASH от 0 до 10, GoodBoy/BadBoy 0 или 1. Не выдумывай факты."},
+            {"role": "user", "content": material[:24000]},
         ],
         GROQ_STRUCTURED_MODEL,
         0.1,
     )
-    if not result:
-        return {"str": 0, "rep": 0, "con": 0, "cash": 0, "goodboy": 0, "badboy": 0}
     try:
-        content = result["choices"][0]["message"]["content"]
+        parsed = json_object(result["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError):
-        return {"str": 0, "rep": 0, "con": 0, "cash": 0, "goodboy": 0, "badboy": 0}
-    parsed = extract_json(content) or {}
+        parsed = {}
     return {
         "str": max(0, min(2, safe_int(parsed.get("str")))),
         "rep": max(0, min(2, safe_int(parsed.get("rep")))),
@@ -516,303 +442,132 @@ async def analyze_daily_material(material: str) -> dict[str, int]:
     }
 
 
-async def add_event(message: Message, event_type: str, text: str, anketa_url: str | None = None):
-    assert db_pool is not None
+async def add_event(message: Message, text: str, event_type: str = "пост"):
     text = (text or "").strip()
     if not text:
         return
-    user_id = message.from_user.id if message.from_user else None
-    player = await get_player(user_id) if user_id else None
+    player = await get_player(message.from_user.id) if message.from_user else None
     username = clean_username(message.from_user.username if message.from_user else None)
-    character = rget(player, "charactername") if player else None
     if not username and player:
         username = clean_username(rget(player, "username"))
-    tag = extract_story_tag(text)
+    tag = story_tag(text)
     topic = topic_id(message)
     await db_pool.execute(
         """
-        INSERT INTO newsevents(
-            sourcechatid, telegrammessageid, userid, charactername, username,
-            eventtype, text, topicid, topicname, anketaurl, storytag
-        )
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        INSERT INTO newsevents(sourcechatid, telegrammessageid, userid, charactername, username, eventtype, text, topicid, topicname, storytag)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
         ON CONFLICT(sourcechatid, telegrammessageid) DO NOTHING
         """,
-        message.chat.id,
-        message.message_id,
-        user_id,
-        character,
-        username,
-        event_type,
-        text[:MAX_EVENT_TEXT],
-        topic,
-        topic_name(topic),
-        anketa_url,
-        tag,
+        message.chat.id, message.message_id, message.from_user.id if message.from_user else None,
+        rget(player, "charactername") if player else None, username, event_type, text[:4000], topic, topic_name(topic), tag,
     )
     if tag:
         await db_pool.execute(
             """
-            INSERT INTO story_threads(tag, last_seen, event_count)
-            VALUES($1, NOW(), 1)
-            ON CONFLICT(tag) DO UPDATE SET
-                last_seen = NOW(), event_count = story_threads.event_count + 1,
-                archived = FALSE
+            INSERT INTO story_threads(tag,last_seen,event_count) VALUES($1,NOW(),1)
+            ON CONFLICT(tag) DO UPDATE SET last_seen=NOW(), event_count=story_threads.event_count+1, archived=FALSE
             """,
             tag,
         )
 
 
-async def mark_player_active(user_id: int):
-    assert db_pool is not None
-    await db_pool.execute(
-        """
-        UPDATE players
-        SET lastpost = $1, activitystatus = 'active', status =
-            CASE WHEN status = 'Нищий' THEN status ELSE '' END
-        WHERE userid = $2
-        """,
-        now_utc(),
-        user_id,
-    )
+async def mark_active(user_id: int):
+    await db_pool.execute("UPDATE players SET lastpost=$1, activitystatus='active' WHERE userid=$2", now_utc(), user_id)
 
 
-async def update_stats_immediate(message: Message, text: str):
-    if len(text) < MIN_TEXT_FOR_STATS:
-        return
-    assert db_pool is not None
-    user_id = message.from_user.id
-    player = await get_player(user_id)
-    if not player:
-        return
-    inserted = await db_pool.fetchval(
-        """
-        INSERT INTO processedmessages(messageid)
-        VALUES($1) ON CONFLICT(messageid) DO NOTHING
-        RETURNING messageid
-        """,
-        message.message_id,
-    )
-    if inserted is None:
-        return
-
-    result = await analyze_daily_material(text)
-    player = await reset_week_if_needed(player)
-    str_add = min(result["str"], max(0, WEEK_STR_CAP - safe_int(player["strweeklimit"])))
-    rep_add = min(result["rep"], max(0, WEEK_REP_CAP - safe_int(player["repweeklimit"])))
-    con_add = min(result["con"], max(0, WEEK_CON_CAP - safe_int(player["conweeklimit"])))
-    cash_add = min(result["cash"], max(0, WEEK_CASH_CAP - safe_int(player["moneyweeklimit"])))
-    await db_pool.execute(
-        """
-        UPDATE players SET
-            str = str + $1, rep = rep + $2, con = con + $3,
-            money = money + $4, cash = COALESCE(cash, money) + $4,
-            strweeklimit = strweeklimit + $1,
-            repweeklimit = repweeklimit + $2,
-            conweeklimit = conweeklimit + $3,
-            moneyweeklimit = moneyweeklimit + $4,
-            badboycount = badboycount + $5,
-            goodboycount = goodboycount + $6,
-            lastpost = $7, activitystatus = 'active'
-        WHERE userid = $8
-        """,
-        str_add,
-        rep_add,
-        con_add,
-        cash_add,
-        result["badboy"],
-        result["goodboy"],
-        now_utc(),
-        user_id,
-    )
-    for action, value in (("str", str_add), ("rep", rep_add), ("con", con_add), ("cash", cash_add)):
-        if value:
-            await db_pool.execute(
-                """
-                INSERT INTO actions(userid, actiontype, actionvalue, telegrammessageid, topicid)
-                VALUES($1,$2,$3,$4,$5)
-                ON CONFLICT(telegrammessageid) DO NOTHING
-                """,
-                user_id,
-                action,
-                value,
-                message.message_id,
-                topic_id(message),
-            )
-
-
-async def process_daily_day(progress_date: date):
-    assert db_pool is not None
+async def process_daily(progress_date: date):
     start = datetime.combine(progress_date, datetime.min.time(), tzinfo=MSK).astimezone(UTC)
     end = start + timedelta(days=1)
-    rows = await db_pool.fetch(
+    events = await db_pool.fetch(
         """
-        SELECT * FROM newsevents
-        WHERE createdat >= $1 AND createdat < $2
-          AND statsprocessedat IS NULL
-          AND userid IS NOT NULL
-          AND (topicid IS NULL OR topicid <> $3)
+        SELECT * FROM newsevents WHERE createdat >= $1 AND createdat < $2
+        AND statsprocessedat IS NULL AND userid IS NOT NULL AND (topicid IS NULL OR topicid <> $3)
         ORDER BY userid, createdat
         """,
-        start,
-        end,
-        FLOOD_TOPIC_ID,
+        start, end, FLOOD_TOPIC_ID,
     )
     grouped: dict[int, list[Any]] = {}
-    for row in rows:
-        grouped.setdefault(safe_int(row["userid"]), []).append(row)
-
-    for user_id, events in grouped.items():
-        material_parts = []
-        total_chars = 0
-        for event in events:
-            tag = f"#{event['storytag']}" if event["storytag"] else "без тега"
-            material_parts.append(
-                f"[{tag}] {event['topicname'] or ''}: "
-                f"{event['text'][:3000]}"
-            )
-            total_chars += len(event["text"] or "")
-        material = "\n\n".join(material_parts)
-        result = await analyze_daily_material(material) if total_chars >= MIN_TEXT_FOR_STATS else {
-            "str": 0, "rep": 0, "con": 0, "cash": 0, "goodboy": 0, "badboy": 0
-        }
-        player = await get_player(user_id)
+    for event in events:
+        grouped.setdefault(safe_int(event["userid"]), []).append(event)
+    for user_id, player_events in grouped.items():
+        if await db_pool.fetchval("SELECT 1 FROM daily_progress WHERE userid=$1 AND progressdate=$2", user_id, progress_date):
+            continue
+        material = "\n\n".join(
+            f"#{event['storytag'] if event['storytag'] else 'без-тега'} | {event['topicname'] or ''}\n{event['text']}"
+            for event in player_events
+        )
+        chars = sum(len(event["text"] or "") for event in player_events)
+        result = await analyze(material) if chars >= 300 else {"str": 0, "rep": 0, "con": 0, "cash": 0, "goodboy": 0, "badboy": 0}
+        player = await reset_week(await get_player(user_id))
         if not player:
             continue
-        player = await reset_week_if_needed(player)
-        str_add = min(result["str"], max(0, WEEK_STR_CAP - safe_int(player["strweeklimit"])))
-        rep_add = min(result["rep"], max(0, WEEK_REP_CAP - safe_int(player["repweeklimit"])))
-        con_add = min(result["con"], max(0, WEEK_CON_CAP - safe_int(player["conweeklimit"])))
-        ai_cash = min(result["cash"], max(0, WEEK_CASH_CAP - safe_int(player["moneyweeklimit"])))
-        daily_expense = -5
-        active_reward = 10
-        cash_delta = daily_expense + active_reward + ai_cash
+        str_add = min(result["str"], max(0, 3 - safe_int(player["strweeklimit"])))
+        rep_add = min(result["rep"], max(0, 7 - safe_int(player["repweeklimit"])))
+        con_add = min(result["con"], max(0, 8 - safe_int(player["conweeklimit"])))
+        ai_cash = min(result["cash"], max(0, 1000 - safe_int(player["moneyweeklimit"])))
+        cash_delta = -5 + 10 + ai_cash
         await db_pool.execute(
             """
-            INSERT INTO daily_progress(
-                userid, progressdate, posts_count, text_chars, str_delta,
-                rep_delta, con_delta, cash_delta, goodboy_delta, badboy_delta, material
-            )
+            INSERT INTO daily_progress(userid,progressdate,posts_count,text_chars,str_delta,rep_delta,con_delta,cash_delta,goodboy_delta,badboy_delta,material)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            ON CONFLICT(userid, progressdate) DO NOTHING
             """,
-            user_id,
-            progress_date,
-            len(events),
-            total_chars,
-            str_add,
-            rep_add,
-            con_add,
-            cash_delta,
-            result["goodboy"],
-            result["badboy"],
-            material[:20000],
+            user_id, progress_date, len(player_events), chars, str_add, rep_add, con_add, cash_delta, result["goodboy"], result["badboy"], material[:24000],
         )
         await db_pool.execute(
             """
-            UPDATE players SET
-                str = str + $1, rep = rep + $2, con = con + $3,
-                money = money + $4, cash = COALESCE(cash, money) + $4,
-                strweeklimit = strweeklimit + $1,
-                repweeklimit = repweeklimit + $2,
-                conweeklimit = conweeklimit + $3,
-                moneyweeklimit = moneyweeklimit + $4,
-                goodboycount = goodboycount + $5,
-                badboycount = badboycount + $6,
-                activitystatus = 'active', lastpost = $7,
-                cashstatus = CASE WHEN COALESCE(cash, money) + $4 <= 0 THEN 'Нищий' ELSE 'normal' END,
-                status = CASE WHEN COALESCE(cash, money) + $4 <= 0 THEN 'Нищий' ELSE status END
-            WHERE userid = $8
+            UPDATE players SET str=str+$1, rep=rep+$2, con=con+$3,
+            money=money+$4, cash=COALESCE(cash,money)+$4,
+            strweeklimit=strweeklimit+$1, repweeklimit=repweeklimit+$2, conweeklimit=conweeklimit+$3,
+            moneyweeklimit=moneyweeklimit+$5, goodboycount=goodboycount+$6, badboycount=badboycount+$7,
+            activitystatus='active', lastpost=$8,
+            cashstatus=CASE WHEN COALESCE(cash,money)+$4 <= 0 THEN 'Нищий' ELSE 'normal' END
+            WHERE userid=$9
             """,
-            str_add,
-            rep_add,
-            con_add,
-            cash_delta,
-            result["goodboy"],
-            result["badboy"],
-            now_utc(),
-            user_id,
+            str_add, rep_add, con_add, cash_delta, ai_cash, result["goodboy"], result["badboy"], now_utc(), user_id,
         )
-        await db_pool.execute(
-            "INSERT INTO economy_ledger(userid, amount, reason, progressdate) VALUES($1,$2,$3,$4)",
-            user_id, daily_expense, "ежедневные расходы активного игрока", progress_date,
-        )
-        await db_pool.execute(
-            "INSERT INTO economy_ledger(userid, amount, reason, progressdate) VALUES($1,$2,$3,$4)",
-            user_id, active_reward + ai_cash, "активный день и результат анализа", progress_date,
-        )
-        await db_pool.execute(
-            """
-            INSERT INTO player_achievements(userid, achievement, count)
-            VALUES($1,'GoodBoy',$2)
-            ON CONFLICT(userid, achievement) DO UPDATE SET
-                count = player_achievements.count + EXCLUDED.count, updatedat = NOW()
-            """,
-            user_id, result["goodboy"],
-        )
-        await db_pool.execute(
-            """
-            INSERT INTO player_achievements(userid, achievement, count)
-            VALUES($1,'BadBoy',$2)
-            ON CONFLICT(userid, achievement) DO UPDATE SET
-                count = player_achievements.count + EXCLUDED.count, updatedat = NOW()
-            """,
-            user_id, result["badboy"],
-        )
-        ids = [event["id"] for event in events]
-        await db_pool.execute(
-            "UPDATE newsevents SET statsprocessedat = NOW() WHERE id = ANY($1::bigint[])",
-            ids,
-        )
-
+        await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,-5,'расходы активного дня',$2)", user_id, progress_date)
+        await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,$2,'награда активного дня и анализ',$3)", user_id, 10 + ai_cash, progress_date)
+        for achievement, value in (("GoodBoy", result["goodboy"]), ("BadBoy", result["badboy"])):
+            await db_pool.execute(
+                """
+                INSERT INTO player_achievements(userid,achievement,count) VALUES($1,$2,$3)
+                ON CONFLICT(userid,achievement) DO UPDATE SET count=player_achievements.count+EXCLUDED.count, updatedat=NOW()
+                """,
+                user_id, achievement, value,
+            )
+        await db_pool.execute("UPDATE newsevents SET statsprocessedat=NOW() WHERE id=ANY($1::bigint[])", [event["id"] for event in player_events])
     readers = await db_pool.fetch(
         """
-        SELECT p.userid FROM players p
-        WHERE NOT EXISTS(
-            SELECT 1 FROM daily_progress d
-            WHERE d.userid = p.userid AND d.progressdate = $1
+        SELECT p.userid FROM players p WHERE NOT EXISTS(
+            SELECT 1 FROM daily_progress d WHERE d.userid=p.userid AND d.progressdate=$1
         )
         """,
         progress_date,
     )
-    for reader in readers:
-        user_id = reader["userid"]
+    for row in readers:
+        user_id = row["userid"]
+        await db_pool.execute("INSERT INTO daily_progress(userid,progressdate,cash_delta) VALUES($1,$2,-2) ON CONFLICT DO NOTHING", user_id, progress_date)
         await db_pool.execute(
             """
-            INSERT INTO daily_progress(userid, progressdate, cash_delta)
-            VALUES($1,$2,-2)
-            ON CONFLICT(userid, progressdate) DO NOTHING
-            """,
-            user_id, progress_date,
-        )
-        await db_pool.execute(
-            """
-            UPDATE players SET
-                cash = COALESCE(cash, money) - 2,
-                money = money - 2,
-                activitystatus = 'reader',
-                cashstatus = CASE WHEN COALESCE(cash, money) - 2 <= 0 THEN 'Нищий' ELSE cashstatus END,
-                status = CASE WHEN COALESCE(cash, money) - 2 <= 0 THEN 'Нищий' ELSE status END
-            WHERE userid = $1
+            UPDATE players SET money=money-2, cash=COALESCE(cash,money)-2, activitystatus='reader',
+            cashstatus=CASE WHEN COALESCE(cash,money)-2 <= 0 THEN 'Нищий' ELSE cashstatus END
+            WHERE userid=$1
             """,
             user_id,
         )
-        await db_pool.execute(
-            "INSERT INTO economy_ledger(userid, amount, reason, progressdate) VALUES($1,-2,'расходы читателя',$2)",
-            user_id, progress_date,
-        )
-    logger.info("Daily progress processed for %s", progress_date)
+        await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,-2,'расходы читателя',$2)", user_id, progress_date)
+    logger.info("Daily progress processed: %s", progress_date)
 
 
 async def daily_loop():
     while True:
         try:
             current = now_msk()
-            next_run = current.replace(hour=5, minute=0, second=0, microsecond=0)
-            if current >= next_run:
-                next_run += timedelta(days=1)
-            await asyncio.sleep(max(1, (next_run - current).total_seconds()))
-            await process_daily_day((next_run - timedelta(days=1)).date())
+            run_at = current.replace(hour=5, minute=0, second=0, microsecond=0)
+            if current >= run_at:
+                run_at += timedelta(days=1)
+            await asyncio.sleep(max(1, (run_at - current).total_seconds()))
+            await process_daily((run_at - timedelta(days=1)).date())
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -820,58 +575,28 @@ async def daily_loop():
             await asyncio.sleep(60)
 
 
-async def generate_news(catchup: bool = False):
-    assert db_pool is not None
-    if catchup:
-        events = await db_pool.fetch(
-            """
-            SELECT * FROM newsevents
-            WHERE usedinnewsat IS NULL
-              AND (topicid IS NULL OR topicid <> $1)
-            ORDER BY createdat ASC LIMIT 300
-            """,
-            FLOOD_TOPIC_ID,
-        )
-    else:
-        events = await db_pool.fetch(
-            """
-            SELECT * FROM newsevents
-            WHERE usedinnewsat IS NULL
-              AND createdat >= $1
-              AND (topicid IS NULL OR topicid <> $2)
-            ORDER BY createdat ASC LIMIT 300
-            """,
-            now_utc() - timedelta(hours=NEWS_INTERVAL_HOURS),
-            FLOOD_TOPIC_ID,
-        )
+async def generate_news() -> tuple[str, list[int]] | None:
+    events = await db_pool.fetch(
+        """
+        SELECT * FROM newsevents WHERE usedinnewsat IS NULL
+        AND (topicid IS NULL OR topicid <> $1) ORDER BY createdat ASC LIMIT 300
+        """,
+        FLOOD_TOPIC_ID,
+    )
     if not events:
         return None
-    blocks: dict[str, list[str]] = {}
+    groups: dict[str, list[str]] = {}
     for event in events:
-        tag = event["storytag"] or "без тега"
-        author = display_name({"charactername": event["charactername"], "username": event["username"], "userid": event["userid"]})
-        blocks.setdefault(tag, []).append(
-            f"{author} | {event['topicname'] or ''} | {event['text'][:2500]}"
-        )
-    source = "\n\n".join(
-        f"#{tag}\n" + "\n".join(items)
-        for tag, items in blocks.items()
-    )
-    prompt = (
-        "Составь короткую живую новость для Telegram по игровым событиям. "
-        "Не выдумывай факты, сохрани имена и теги, не используй markdown-заголовки. "
-        "Пиши на русском, 3–8 абзацев.\n\n" + source[:30000]
-    )
-    result = await groq_request(
+        tag = event["storytag"] or "без-тега"
+        author = display_name({"userid": event["userid"], "charactername": event["charactername"], "username": event["username"]})
+        groups.setdefault(tag, []).append(f"{author}: {event['text'][:2500]}")
+    source = "\n\n".join(f"#{tag}\n" + "\n".join(items) for tag, items in groups.items())
+    result = await groq(
         [
-            {"role": "system", "content": "Ты редактор новостей ролевого города."},
-            {"role": "user", "content": prompt},
-        ],
-        GROQ_MODEL,
-        0.7,
+            {"role": "system", "content": "Ты редактор новостей ролевого города. Не выдумывай факты."},
+            {"role": "user", "content": f"Составь живую новость на русском по материалу ниже. 3-8 абзацев.\n\n{source[:30000]}"},
+        ], GROQ_MODEL, 0.7,
     )
-    if not result:
-        return None
     try:
         text = result["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError):
@@ -883,17 +608,12 @@ async def news_loop():
     await asyncio.sleep(30)
     while True:
         try:
-            result = await generate_news(catchup=True)
-            if result:
-                text, ids = result
-                await bot.send_message(GROUP_ID, text, message_thread_id=STORY_TOPIC_ID or None)
-                await db_pool.execute("UPDATE newsevents SET usedinnewsat = NOW() WHERE id = ANY($1::bigint[])", ids)
-            await asyncio.sleep(NEWS_INTERVAL_HOURS * 3600)
             result = await generate_news()
             if result:
                 text, ids = result
                 await bot.send_message(GROUP_ID, text, message_thread_id=STORY_TOPIC_ID or None)
-                await db_pool.execute("UPDATE newsevents SET usedinnewsat = NOW() WHERE id = ANY($1::bigint[])", ids)
+                await db_pool.execute("UPDATE newsevents SET usedinnewsat=NOW() WHERE id=ANY($1::bigint[])", ids)
+            await asyncio.sleep(6 * 3600)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -901,177 +621,70 @@ async def news_loop():
             await asyncio.sleep(60)
 
 
-async def inactivity_loop():
-    while True:
-        try:
-            await asyncio.sleep(24 * 3600)
-            cutoff = now_utc() - timedelta(days=INACTIVITY_DAYS)
-            rows = await db_pool.fetch(
-                "SELECT * FROM players WHERE lastpost IS NOT NULL AND lastpost < $1 AND activitystatus <> 'inactive'",
-                cutoff,
-            )
-            for player in rows:
-                await db_pool.execute(
-                    """
-                    UPDATE players SET activitystatus='inactive', status='Неактивен',
-                        str=1, rep=1, con=1, money=100, cash=100
-                    WHERE userid=$1
-                    """,
-                    player["userid"],
-                )
-                try:
-                    await bot.send_message(
-                        player["userid"],
-                        "Ты не появлялся в игре 30 дней. Статы сброшены до базовых значений.",
-                    )
-                except Exception:
-                    logger.info("Could not notify inactive player %s", player["userid"])
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Inactivity loop failed")
-            await asyncio.sleep(60)
-
-
-async def top_loop():
-    while True:
-        try:
-            await asyncio.sleep(7 * 24 * 3600)
-            rows = await db_pool.fetch(
-                """
-                SELECT * FROM players
-                ORDER BY rep DESC, str DESC, con DESC, COALESCE(cash, money) DESC
-                LIMIT 10
-                """
-            )
-            if not rows:
-                continue
-            lines = ["🏆 <b>Топ игроков недели</b>", ""]
-            for index, player in enumerate(rows, 1):
-                lines.append(
-                    f"{index}. {escape(display_name(player))} — "
-                    f"REP {player['rep']} · STR {player['str']} · "
-                    f"CON {player['con']} · CASH {rget(player, 'cash', player['money'])}"
-                )
-            await bot.send_message(GROUP_ID, "\n".join(lines), parse_mode="HTML", message_thread_id=STORY_TOPIC_ID or None)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Top loop failed")
-            await asyncio.sleep(60)
-
-
-def level_status(value: int) -> tuple[int, str]:
-    if value >= 15:
-        return 5, "легендарный"
-    if value >= 11:
-        return 4, "высокий"
-    if value >= 7:
-        return 3, "уверенный"
-    if value >= 3:
-        return 2, "развивающийся"
+def level(value: int) -> tuple[int, str]:
+    if value >= 15: return 5, "легендарный"
+    if value >= 11: return 4, "высокий"
+    if value >= 7: return 3, "уверенный"
+    if value >= 3: return 2, "развивающийся"
     return 1, "начальный"
 
 
 def badge(player: Any) -> str:
-    bad = safe_int(rget(player, "badboycount"))
     good = safe_int(rget(player, "goodboycount"))
-    if bad >= good + 5:
-        return "😈 BadBoy"
-    if good >= bad + 5:
-        return "😇 GoodBoy"
+    bad = safe_int(rget(player, "badboycount"))
+    if good >= bad + 5: return "😇 GoodBoy"
+    if bad >= good + 5: return "😈 BadBoy"
     return ""
 
 
-async def build_profile_text(player: Any) -> str:
-    str_level, str_status = level_status(safe_int(player["str"]))
-    rep_level, rep_status = level_status(safe_int(player["rep"]))
-    con_level, con_status = level_status(safe_int(player["con"]))
-    username = clean_username(rget(player, "username"))
-    character = str(rget(player, "charactername") or "Без имени")
+async def profile_text(player: Any) -> str:
+    sl, ss = level(safe_int(player["str"]))
+    rl, rs = level(safe_int(player["rep"]))
+    cl, cs = level(safe_int(player["con"]))
     cash = safe_int(rget(player, "cash", rget(player, "money", 0)))
-    anketa = rget(player, "anketaurl")
-    name_line = escape(character)
-    if username:
-        name_line += f" (@{escape(username)})"
+    name = escape(display_name(player))
     lines = [
-        f"👤 <b>{name_line}</b>",
-        "",
-        f"💪 STR: {player['str']} — {str_status} ({str_level})",
-        f"🤝 REP: {player['rep']} — {rep_status} ({rep_level})",
-        f"🫀 CON: {player['con']} — {con_status} ({con_level})",
+        f"👤 <b>{name}</b>", "",
+        f"💪 STR: {player['str']} — {ss} ({sl})",
+        f"🤝 REP: {player['rep']} — {rs} ({rl})",
+        f"🫀 CON: {player['con']} — {cs} ({cl})",
         f"💰 CASH: {cash}",
-        f"📊 Статус активности: {escape(str(rget(player, 'activitystatus', 'reader')))}",
+        f"📊 Активность: {escape(str(rget(player, 'activitystatus', 'reader')))}",
         f"💳 Денежный статус: {escape(str(rget(player, 'cashstatus', 'normal')))}",
         f"🎭 Игровая репутация: {rget(player, 'repgame', 0)}",
-        f"🏙 Репутация в сообществе: {rget(player, 'repcommunity', 0)}",
+        f"🏙 Репутация сообщества: {rget(player, 'repcommunity', 0)}",
     ]
-    if rget(player, "admintitle"):
-        lines.append(f"🛡 Админский титул: {escape(str(player['admintitle']))}")
-    if rget(player, "businessname"):
-        lines.append(f"🏢 Бизнес: {escape(str(player['businessname']))}")
-    if badge(player):
-        lines.append(f"{badge(player)}")
-    if anketa:
-        lines.append(f'📄 <a href="{escape(str(anketa), quote=True)}">Анкета</a>')
-    last = rget(player, "lastpost")
-    if last:
-        lines.append(f"🕒 Последний пост: {last.astimezone(MSK).strftime('%d.%m.%Y %H:%M')}")
+    if badge(player): lines.append(badge(player))
+    if rget(player, "anketaurl"):
+        lines.append(f'<a href="{escape(str(player["anketaurl"]), quote=True)}">📄 Анкета</a>')
     return "\n".join(lines)
-
-
-async def show_profile(message: Message, player: Any):
-    await message.answer(await build_profile_text(player), parse_mode="HTML")
-
-
-async def send_welcome(message: Message, player: Any, new: bool):
-    rules = f'\n<a href="{escape(RULES_URL, quote=True)}">Правила</a>' if RULES_URL else ""
-    if new:
-        text = (
-            f"🎉 Добро пожаловать, <b>{escape(str(player['charactername']))}</b>!\n\n"
-            "Твои стартовые значения: STR 4 · REP 4 · CON 4 · CASH 500."
-        )
-    else:
-        text = f"С возвращением, <b>{escape(str(player['charactername'] or 'игрок'))}</b>!"
-    await message.answer(text + rules, parse_mode="HTML")
 
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    player = await get_player(user_id)
-    if not player:
+    player = await get_player(message.from_user.id)
+    if not player or not rget(player, "charactername"):
         await state.set_state(RegistrationState.waiting_for_character_name)
-        await message.answer("Напиши имя персонажа одним сообщением. От 2 до 50 символов.")
+        await message.answer("Напиши имя персонажа — от 2 до 50 символов.")
         return
-    if not rget(player, "charactername"):
-        await state.set_state(RegistrationState.waiting_for_character_name)
-        await message.answer("Напиши имя персонажа одним сообщением. От 2 до 50 символов.")
-        return
-    await send_welcome(message, player, False)
+    player = await update_username(player, message.from_user.username)
+    await message.answer(f"С возвращением, <b>{escape(str(player['charactername']))}</b>!", parse_mode="HTML")
 
 
 @dp.message(StateFilter(RegistrationState.waiting_for_character_name))
-async def process_character_name(message: Message, state: FSMContext):
-    character_name = (message.text or "").strip()
-    if not 2 <= len(character_name) <= 50:
+async def process_name(message: Message, state: FSMContext):
+    character = (message.text or "").strip()
+    if not 2 <= len(character) <= 50:
         await message.answer("Имя должно содержать от 2 до 50 символов.")
         return
-    user_id = message.from_user.id
-    player = await get_player(user_id)
+    player = await get_player(message.from_user.id)
     if player:
-        await db_pool.execute(
-            "UPDATE players SET charactername=$1, username=$2, firststartseen=TRUE WHERE userid=$3",
-            character_name, clean_username(message.from_user.username), user_id,
-        )
-        player = await get_player(user_id)
-        created = False
+        await db_pool.execute("UPDATE players SET charactername=$1, username=$2, firststartseen=TRUE WHERE userid=$3", character, clean_username(message.from_user.username), message.from_user.id)
+        player = await get_player(message.from_user.id)
     else:
-        player, created = await register_player(
-            user_id, message.from_user.username, character_name, True
-        )
+        player, _ = await register_player(message.from_user.id, message.from_user.username, character)
     await state.clear()
-    await send_welcome(message, player, created)
+    await message.answer(f"🎉 Добро пожаловать, <b>{escape(character)}</b>!\nSTR 4 · REP 4 · CON 4 · CASH 500", parse_mode="HTML")
 
 
 @dp.message(Command("profile"))
@@ -1079,13 +692,13 @@ async def cmd_profile(message: Message):
     args = (message.text or "").split()
     player = await get_player_by_username(args[1]) if len(args) > 1 else await get_player(message.from_user.id)
     if not player:
-        await message.answer("Игрок не найден. Используй /start для регистрации.")
+        await message.answer("Игрок не найден. Используй /start.")
         return
-    await show_profile(message, player)
+    await message.answer(await profile_text(player), parse_mode="HTML")
 
 
 @dp.message(Command("setanket"))
-async def cmd_setanket(message: Message):
+async def cmd_anket(message: Message):
     player = await get_player(message.from_user.id)
     if not player:
         await message.answer("Сначала используй /start.")
@@ -1094,22 +707,13 @@ async def cmd_setanket(message: Message):
     if not match:
         await message.answer("Формат: /setanket https://t.me/...")
         return
-    url = match.group(0).rstrip(".,!?)]}")
-    await db_pool.execute("UPDATE players SET anketaurl=$1 WHERE userid=$2", url, message.from_user.id)
+    await db_pool.execute("UPDATE players SET anketaurl=$1 WHERE userid=$2", match.group(0).rstrip(".,!?)]}"), message.from_user.id)
     await message.answer("Анкета сохранена.")
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    text = (
-        "<b>Команды</b>\n\n"
-        "/start — регистрация\n"
-        "/profile — свой профиль\n"
-        "/profile @username — профиль игрока\n"
-        "/setanket URL — добавить анкету\n"
-        "/random str|rep|con|cash @username — случайное сравнение\n"
-        "/economy — последние операции с CASH"
-    )
+    text = "<b>Команды</b>\n/start\n/profile\n/profile @username\n/setanket URL\n/random str|rep|con|cash @username\n/economy"
     if is_admin(message.from_user.id):
         text += "\n\n<b>Админские</b>\n/stats\n/player @username\n/setname @username Имя\n/awardcash @username сумма причина\n/business @username Название зарплата"
     await message.answer(text, parse_mode="HTML")
@@ -1117,18 +721,17 @@ async def cmd_help(message: Message):
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    players = await db_pool.fetchval("SELECT COUNT(*) FROM players")
-    events = await db_pool.fetchval("SELECT COUNT(*) FROM newsevents")
-    actions = await db_pool.fetchval("SELECT COUNT(*) FROM actions")
-    await message.answer(f"Игроков: {players}\nСобытий: {events}\nДействий: {actions}")
+    if not is_admin(message.from_user.id): return
+    await message.answer(
+        f"Игроков: {await db_pool.fetchval('SELECT COUNT(*) FROM players')}\n"
+        f"Событий: {await db_pool.fetchval('SELECT COUNT(*) FROM newsevents')}\n"
+        f"Действий: {await db_pool.fetchval('SELECT COUNT(*) FROM actions')}"
+    )
 
 
 @dp.message(Command("player"))
 async def cmd_player(message: Message):
-    if not is_admin(message.from_user.id):
-        return
+    if not is_admin(message.from_user.id): return
     args = (message.text or "").split()
     if len(args) < 2:
         await message.answer("Формат: /player @username")
@@ -1137,13 +740,12 @@ async def cmd_player(message: Message):
     if not player:
         await message.answer("Игрок не найден.")
         return
-    await show_profile(message, player)
+    await message.answer(await profile_text(player), parse_mode="HTML")
 
 
 @dp.message(Command("setname"))
 async def cmd_setname(message: Message):
-    if not is_admin(message.from_user.id):
-        return
+    if not is_admin(message.from_user.id): return
     args = (message.text or "").split(maxsplit=2)
     if len(args) < 3:
         await message.answer("Формат: /setname @username Имя")
@@ -1157,49 +759,36 @@ async def cmd_setname(message: Message):
 
 
 @dp.message(Command("awardcash"))
-async def cmd_award_cash(message: Message):
-    if not is_admin(message.from_user.id):
-        return
+async def cmd_awardcash(message: Message):
+    if not is_admin(message.from_user.id): return
     args = (message.text or "").split(maxsplit=3)
     if len(args) < 3:
         await message.answer("Формат: /awardcash @username сумма причина")
         return
     player = await get_player_by_username(args[1])
+    amount = safe_int(args[2])
     if not player:
         await message.answer("Игрок не найден.")
         return
-    amount = safe_int(args[2])
     reason = args[3] if len(args) > 3 else "админская операция"
-    await db_pool.execute(
-        "UPDATE players SET cash=COALESCE(cash,money)+$1, money=money+$1 WHERE userid=$2",
-        amount, player["userid"],
-    )
-    await db_pool.execute(
-        "INSERT INTO economy_ledger(userid, amount, reason) VALUES($1,$2,$3)",
-        player["userid"], amount, reason,
-    )
-    await message.answer(f"Операция выполнена: {amount:+d} CASH.")
+    await db_pool.execute("UPDATE players SET money=money+$1, cash=COALESCE(cash,money)+$1 WHERE userid=$2", amount, player["userid"])
+    await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason) VALUES($1,$2,$3)", player["userid"], amount, reason)
+    await message.answer(f"Готово: {amount:+d} CASH")
 
 
 @dp.message(Command("business"))
 async def cmd_business(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    args = (message.text or "").split(maxsplit=3)
-    if len(args) < 4:
+    if not is_admin(message.from_user.id): return
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 3:
         await message.answer("Формат: /business @username Название зарплата")
         return
     player = await get_player_by_username(args[1])
-    if not player:
-        await message.answer("Игрок не найден.")
+    parts = args[2].rsplit(" ", 1)
+    if not player or len(parts) != 2 or not parts[1].lstrip("-").isdigit():
+        await message.answer("Игрок не найден или зарплата указана неверно.")
         return
-    parts = args[3].rsplit(" ", 1)
-    if len(parts) != 2 or not parts[1].lstrip("-").isdigit():
-        await message.answer("Последним параметром укажи зарплату числом.")
-        return
-    name = f"{args[2]} {parts[0]}".strip()
-    salary = int(parts[1])
-    await db_pool.execute("UPDATE players SET businessname=$1, businesssalary=$2 WHERE userid=$3", name, salary, player["userid"])
+    await db_pool.execute("UPDATE players SET businessname=$1,businesssalary=$2 WHERE userid=$3", parts[0], int(parts[1]), player["userid"])
     await message.answer("Бизнес сохранён.")
 
 
@@ -1209,10 +798,7 @@ async def cmd_economy(message: Message):
     if not player:
         await message.answer("Сначала используй /start.")
         return
-    rows = await db_pool.fetch(
-        "SELECT amount, reason, createdat FROM economy_ledger WHERE userid=$1 ORDER BY createdat DESC LIMIT 10",
-        message.from_user.id,
-    )
+    rows = await db_pool.fetch("SELECT amount,reason FROM economy_ledger WHERE userid=$1 ORDER BY createdat DESC LIMIT 10", message.from_user.id)
     cash = safe_int(rget(player, "cash", rget(player, "money", 0)))
     lines = [f"💰 CASH: {cash}", "", "Последние операции:"]
     lines.extend(f"{row['amount']:+d} — {escape(row['reason'])}" for row in rows)
@@ -1221,87 +807,65 @@ async def cmd_economy(message: Message):
 
 @dp.message(Command("random"))
 async def cmd_random(message: Message):
-    import random
     args = (message.text or "").split()
-    if len(args) < 3:
+    if len(args) < 3 or args[1].lower() not in {"str", "rep", "con", "cash"}:
         await message.answer("Формат: /random str|rep|con|cash @username")
         return
-    stat = args[1].lower()
-    if stat not in {"str", "rep", "con", "cash"}:
-        await message.answer("Стат: str, rep, con или cash.")
-        return
-    enemy = await get_player_by_username(args[2])
     player = await get_player(message.from_user.id)
+    enemy = await get_player_by_username(args[2])
     if not player or not enemy:
-        await message.answer("Один из игроков не найден.")
+        await message.answer("Игрок не найден.")
         return
-    key = "cash" if stat == "cash" else stat
+    key = args[1].lower()
     own = safe_int(rget(player, key, rget(player, "money", 0)))
-    theirs = safe_int(rget(enemy, key, rget(enemy, "money", 0)))
-    total = own + theirs
-    chance = 50 if total == 0 else own / total * 100
+    other = safe_int(rget(enemy, key, rget(enemy, "money", 0)))
+    chance = 50 if own + other == 0 else own / (own + other) * 100
     winner = display_name(player) if random.uniform(0, 100) < chance else display_name(enemy)
-    await message.answer(
-        f"{stat.upper()}: {display_name(player)} {own} vs {display_name(enemy)} {theirs}\n"
-        f"Шанс первого: {chance:.1f}%\nПобедитель: {winner}"
-    )
+    await message.answer(f"{key.upper()}: {own} vs {other}\nШанс первого: {chance:.1f}%\nПобедитель: {winner}")
 
 
 @dp.message()
-async def handle_message(message: Message, state: FSMContext):
-    if not message.text or not message.from_user:
-        return
-    if message.chat.id != GROUP_ID:
+async def handle_group_message(message: Message, state: FSMContext):
+    if not message.text or not message.from_user or message.chat.id != GROUP_ID:
         return
     current_topic = topic_id(message)
-    if is_ignored_topic(current_topic) or not is_event_topic(current_topic):
+    if current_topic not in {GAME_TOPIC_ID, SEMI_TOPIC_ID, PROFILES_TOPIC_ID}:
         return
-    player = await get_player(message.from_user.id)
-    if not player:
+    if not await get_player(message.from_user.id):
         return
-    await mark_player_active(message.from_user.id)
-    await add_event(message, "пост", message.text)
-    if len(message.text) >= MIN_TEXT_FOR_STATS:
-        await update_stats_immediate(message, message.text)
+    await mark_active(message.from_user.id)
+    await add_event(message, message.text)
 
 
-async def health_handler(request: web.Request):
+async def health(request: web.Request):
     return web.Response(text="Bot is alive")
 
 
-async def start_web_server():
+async def start_web() -> web.AppRunner:
     app = web.Application()
-    app.router.add_get("/", health_handler)
-    app.router.add_get("/health", health_handler)
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
     logger.info("Health server started on port %s", PORT)
     return runner
 
 
 async def main():
-    logger.info("Starting bot")
-    await create_database_pool()
+    await create_pool()
     try:
         await init_database()
-        web_runner = await start_web_server()
-        tasks = [
-            asyncio.create_task(news_loop()),
-            asyncio.create_task(daily_loop()),
-            asyncio.create_task(inactivity_loop()),
-            asyncio.create_task(top_loop()),
-        ]
+        runner = await start_web()
+        tasks = [asyncio.create_task(news_loop()), asyncio.create_task(daily_loop())]
         try:
             await dp.start_polling(bot)
         finally:
-            for task in tasks:
-                task.cancel()
+            for task in tasks: task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await web_runner.cleanup()
+            await runner.cleanup()
     finally:
-        await close_database_pool()
+        await close_pool()
         await bot.session.close()
 
 
