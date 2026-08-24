@@ -669,70 +669,276 @@ async def get_news_events(*, since: datetime | None = None, limit: int = 300) ->
     params.append(limit)
     return await db_pool.fetch(query, *params)
 
+async def build_story_groups(events: list[Any]) -> list[dict[str, Any]]:
+    tagged_events: dict[str, list[Any]] = {}
+
+    for event in events:
+        tag = (event["storytag"] or "").strip().lower()
+
+        if not tag:
+            tag = "без-тега"
+
+        tagged_events.setdefault(tag, []).append(event)
+
+    tags = list(tagged_events.keys())
+
+    if not tags:
+        return []
+
+    if len(tags) == 1:
+        return [
+            {
+                "title": tags[0],
+                "tags": tags,
+            }
+        ]
+
+    compact_lines = []
+
+    for tag, tag_events in tagged_events.items():
+        examples = []
+
+        for event in tag_events[:3]:
+            text = (event["text"] or "").replace("\n", " ").strip()
+            examples.append(text[:350])
+
+        compact_lines.append(
+            f"ТЕГ: #{tag}\n"
+            f"ПРИМЕРЫ: {' | '.join(examples)}"
+        )
+
+    compact_material = "\n\n".join(compact_lines)[:10000]
+
+    result = await groq(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Ты редактор сюжетных линий ролевой игры. "
+                    "Объедини связанные хэштеги в общие сюжетные линии. "
+                    "Теги можно объединять, если они описывают одно событие, "
+                    "один конфликт, одну локацию или последовательное развитие "
+                    "одной истории. Несвязанные теги не объединяй. "
+                    "Верни только JSON без markdown в формате: "
+                    "{\"groups\":["
+                    "{\"title\":\"название сюжета\","
+                    "\"tags\":[\"tag1\",\"tag2\"]}"
+                    "]}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": compact_material,
+            },
+        ],
+        model=GROQ_STRUCTURED_MODEL,
+        temperature=0.1,
+        purpose="story_tag_grouping",
+        max_completion_tokens=500,
+    )
+
+    parsed: dict[str, Any] = {}
+
+    try:
+        parsed = json_object(
+            result["choices"][0]["message"]["content"]
+        )
+    except (KeyError, IndexError, TypeError):
+        logger.exception("STORY GROUPING INVALID RESPONSE")
+
+    groups: list[dict[str, Any]] = []
+    assigned_tags: set[str] = set()
+
+    raw_groups = parsed.get("groups", [])
+
+    if isinstance(raw_groups, list):
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, dict):
+                continue
+
+            raw_tags = raw_group.get("tags", [])
+
+            if not isinstance(raw_tags, list):
+                continue
+
+            valid_tags = []
+
+            for raw_tag in raw_tags:
+                normalized_tag = str(raw_tag).strip().lower()
+
+                if normalized_tag in tagged_events:
+                    valid_tags.append(normalized_tag)
+                    assigned_tags.add(normalized_tag)
+
+            if valid_tags:
+                groups.append(
+                    {
+                        "title": str(
+                            raw_group.get("title")
+                            or valid_tags[0]
+                        )[:120],
+                        "tags": list(dict.fromkeys(valid_tags)),
+                    }
+                )
+
+    for tag in tags:
+        if tag not in assigned_tags:
+            groups.append(
+                {
+                    "title": tag,
+                    "tags": [tag],
+                }
+            )
+
+    logger.info(
+        "STORY GROUPS tags=%s groups=%s details=%s",
+        len(tags),
+        len(groups),
+        groups,
+    )
+
+    return groups
 
 async def build_news_from_events(
     events: list[Any],
-    *,
     urgent: bool = False,
 ) -> tuple[str, list[int]] | None:
     if not events:
         return None
 
-    groups: dict[str, list[str]] = {}
-    for event in events:
-        tag = event["storytag"] or "без-тега"
-        author = display_name({
-            "userid": event["userid"],
-            "charactername": event["charactername"],
-            "username": event["username"],
-        })
-        groups.setdefault(tag, []).append(f"{author}: {event['text'][:2500]}")
+    story_groups = await build_story_groups(events)
 
-    source = "\n\n".join(
-        f"#{tag}\n" + "\n".join(items)
-        for tag, items in groups.items()
-    )
-    mode = (
-        "СРОЧНАЯ НОВОСТЬ. Используй только материал за последние 1–2 часа. "
-        "Сделай компактную живую новость."
-        if urgent else
-        "Обычная новостная лента. Сгруппируй материал по сюжетным тегам "
-        "и сделай цельную живую новость."
-    )
-
-    result = await groq(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Ты редактор новостей ролевого города. Не выдумывай факты, "
-                    "имена, события или детали. Сохраняй смысл исходных постов. "
-                    "Не объединяй несвязанные события в один факт."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"{mode}\n"
-                    "Сохраняй связь событий внутри каждого сюжетного тега. "
-                    "Можно использовать 3–8 абзацев.\n\n"
-                    f"{source[:30000]}"
-                ),
-            },
-        ],
-        GROQ_MODEL,
-        0.7,
-    )
-
-    try:
-        news_text = result["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError, AttributeError):
-        logger.error("News generation returned invalid Groq response")
+    if not story_groups:
+        logger.warning("NEWS NO STORY GROUPS")
         return None
 
-    if not news_text:
+    news_parts: list[str] = []
+    used_event_ids: list[int] = []
+
+    for group_index, group in enumerate(story_groups, start=1):
+        group_tags = set(group["tags"])
+
+        group_events = [
+            event
+            for event in events
+            if (
+                (event["storytag"] or "").strip().lower()
+                or "без-тега"
+            ) in group_tags
+        ]
+
+        if not group_events:
+            continue
+
+        source_parts = []
+
+        for event in group_events:
+            author = display_name(
+                {
+                    "userid": event["userid"],
+                    "charactername": event["charactername"],
+                    "username": event["username"],
+                }
+            )
+
+            text = (event["text"] or "").strip()
+
+            source_parts.append(
+                f"{author}: {text[:1200]}"
+            )
+
+        source = "\n\n".join(source_parts)
+
+        # Безопасный лимит для одного сюжетного запроса.
+        source = source[:9000]
+
+        mode = (
+            "СРОЧНАЯ НОВОСТЬ"
+            if urgent
+            else "ОБЫЧНАЯ НОВОСТЬ"
+        )
+
+        prompt = (
+            f"{mode}.\n"
+            f"Название сюжетной линии: {group['title']}\n"
+            f"Связанные теги: "
+            f"{', '.join('#' + tag for tag in group['tags'])}\n\n"
+            "Напиши одну цельную новость по этой сюжетной линии. "
+            "Свяжи события в последовательное развитие истории. "
+            "Не превращай каждый пост в отдельный заголовок. "
+            "Не выдумывай факты. Сохрани имена персонажей, "
+            "важные детали и причинно-следственные связи. "
+            "Пиши на русском языке, 2–5 абзацев.\n\n"
+            f"{source}"
+        )
+
+        result = await groq(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты редактор новостей ролевого города. "
+                        "Пиши связно, живо и без выдуманных фактов."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            model=GROQ_MODEL,
+            temperature=0.7,
+            purpose=f"news_story_group_{group_index}",
+            max_completion_tokens=650,
+        )
+
+        try:
+            text = result["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError, AttributeError):
+            logger.exception(
+                "NEWS GROUP INVALID RESPONSE group=%s title=%s",
+                group_index,
+                group["title"],
+            )
+            continue
+
+        if not text:
+            logger.warning(
+                "NEWS GROUP EMPTY group=%s title=%s",
+                group_index,
+                group["title"],
+            )
+            continue
+
+        news_parts.append(text)
+        used_event_ids.extend(
+            event["id"]
+            for event in group_events
+        )
+
+        logger.info(
+            "NEWS STORY GENERATED group=%s title=%s tags=%s events=%s source_chars=%s",
+            group_index,
+            group["title"],
+            group["tags"],
+            len(group_events),
+            len(source),
+        )
+
+    if not news_parts or not used_event_ids:
+        logger.warning("NEWS NOTHING GENERATED")
         return None
-    return news_text, [event["id"] for event in events]
+
+    final_text = "\n\n━━━━━━━━━━━━━━\n\n".join(news_parts)
+
+    logger.info(
+        "NEWS READY stories=%s events=%s chars=%s",
+        len(news_parts),
+        len(set(used_event_ids)),
+        len(final_text),
+    )
+
+    return final_text, list(dict.fromkeys(used_event_ids))
 
 
 async def generate_news() -> tuple[str, list[int]] | None:
