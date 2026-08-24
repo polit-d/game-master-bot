@@ -1027,7 +1027,14 @@ async def cmd_start(message: Message, state: FSMContext):
 
 
 
-@dp.message()
+def is_plain_text_message(message: Message) -> bool:
+    return bool(
+        message.text
+        and not message.text.lstrip().startswith("/")
+    )
+
+
+@dp.message(is_plain_text_message)
 async def handle_group_message(message: Message, state: FSMContext):
     """
     First-line handler for RP text posts.
