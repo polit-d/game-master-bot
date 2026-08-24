@@ -455,40 +455,106 @@ async def reset_week(player: Any):
     return player
 
 
-async def groq(messages: list[dict[str, str]], model: str, temperature: float):
+async def groq(
+    messages: list[dict[str, str]],
+    model: str,
+    temperature: float,
+    purpose: str = "unknown",
+    max_completion_tokens: int = 500,
+):
+    input_chars = sum(
+        len(str(message.get("content", "")))
+        for message in messages
+    )
+
+    logger.info(
+        "GROQ START purpose=%s model=%s input_chars=%s max_completion_tokens=%s",
+        purpose,
+        model,
+        input_chars,
+        max_completion_tokens,
+    )
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_completion_tokens": max_completion_tokens,
+    }
+
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as session:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=90)
+        ) as session:
             async with session.post(
                 "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={"model": model, "messages": messages, "temperature": temperature},
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
             ) as response:
                 raw = await response.text()
-                if response.status != 200:
-                    logger.error("Groq %s: %s", response.status, raw[:500])
+
+                if response.status == 413:
+                    logger.error(
+                        "GROQ TOO LARGE purpose=%s model=%s input_chars=%s response=%s",
+                        purpose,
+                        model,
+                        input_chars,
+                        raw[:1000],
+                    )
                     return None
-                return json.loads(raw)
-    except Exception as exc:
-        logger.error("Groq request failed: %s", exc)
+
+                if response.status != 200:
+                    logger.error(
+                        "GROQ ERROR purpose=%s status=%s input_chars=%s response=%s",
+                        purpose,
+                        response.status,
+                        input_chars,
+                        raw[:1000],
+                    )
+                    return None
+
+                data = json.loads(raw)
+
+                logger.info(
+                    "GROQ SUCCESS purpose=%s model=%s input_chars=%s",
+                    purpose,
+                    model,
+                    input_chars,
+                )
+
+                return data
+
+    except asyncio.TimeoutError:
+        logger.error(
+            "GROQ TIMEOUT purpose=%s input_chars=%s",
+            purpose,
+            input_chars,
+        )
         return None
 
-
-def json_object(text: str | None) -> dict:
-    if not text:
-        return {}
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I)
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else {}
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.S)
-        if not match:
-            return {}
-        try:
-            value = json.loads(match.group(0))
-            return value if isinstance(value, dict) else {}
-        except json.JSONDecodeError:
-            return {}
+        logger.exception(
+            "GROQ INVALID JSON purpose=%s",
+            purpose,
+        )
+        return None
+
+    except aiohttp.ClientError:
+        logger.exception(
+            "GROQ HTTP ERROR purpose=%s",
+            purpose,
+        )
+        return None
+
+    except Exception:
+        logger.exception(
+            "GROQ UNEXPECTED ERROR purpose=%s",
+            purpose,
+        )
+        return None
 
 
 async def analyze(material: str) -> dict[str, int]:
