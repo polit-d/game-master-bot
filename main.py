@@ -1010,30 +1010,61 @@ async def cmd_news(message: Message):
         )
 
 
-@dp.message()
+@dp.message(
+    F.chat.id == GROUP_ID,
+    F.text,
+)
 async def handle_group_message(message: Message, state: FSMContext):
-    """Store text posts from the three RP topics; registration is not required."""
-    if not message.text or not message.from_user or message.chat.id != GROUP_ID:
-        return
+    """
+    First-line handler for RP text posts.
 
+    Only the three configured RP topics are stored. Registration is NOT
+    required to store the event; registration is checked later for news/stats.
+    """
     current_topic = topic_id(message)
+
+    logger.info(
+        "INCOMING RP TEXT | chat=%s | user=%s | message=%s | "
+        "topic=%s | thread=%s | is_topic=%s",
+        message.chat.id,
+        message.from_user.id if message.from_user else None,
+        message.message_id,
+        current_topic,
+        message.message_thread_id,
+        message.is_topic_message,
+    )
+
     allowed_topics = {GAME_TOPIC_ID, SEMI_TOPIC_ID, PROFILES_TOPIC_ID}
+
     if current_topic not in allowed_topics:
+        logger.info(
+            "POST IGNORED | reason=topic | topic=%s | allowed=%s | message=%s",
+            current_topic,
+            sorted(allowed_topics),
+            message.message_id,
+        )
         return
 
-    player = await get_player(message.from_user.id)
+    player = await get_player(message.from_user.id) if message.from_user else None
+
     if player:
         await mark_active(message.from_user.id)
 
-    await add_event(message, message.text)
-    logger.info(
-        "POST STORED | registered=%s | chat=%s | user=%s | topic=%s | message=%s",
-        bool(player),
-        message.chat.id,
-        message.from_user.id,
-        current_topic,
-        message.message_id,
-    )
+    try:
+        await add_event(message, message.text)
+        logger.info(
+            "POST STORED | registered=%s | topic=%s | message=%s",
+            bool(player),
+            current_topic,
+            message.message_id,
+        )
+    except Exception:
+        logger.exception(
+            "POST STORE FAILED | topic=%s | message=%s | user=%s",
+            current_topic,
+            message.message_id,
+            message.from_user.id if message.from_user else None,
+        )
 
 
 async def health(request: web.Request):
