@@ -829,6 +829,11 @@ async def handle_group_message(message: Message, state: FSMContext):
     Only the three configured RP topics are stored. Registration is NOT
     required to store the event; registration is checked later for news/stats.
     """
+    # Telegram commands are handled by their dedicated handlers.
+    # Never treat /news (or any other command) as an RP post.
+    if not message.text or message.text.lstrip().startswith('/'):
+        return
+
     current_topic = topic_id(message)
 
     logger.info(
@@ -1030,7 +1035,19 @@ async def cmd_random(message: Message):
 @dp.message(Command("news"))
 async def cmd_news(message: Message):
     """Admin-only urgent news from the last two hours."""
-    if not message.from_user or not is_admin(message.from_user.id):
+    if not message.from_user:
+        return
+
+    admin = is_admin(message.from_user.id)
+    logger.info(
+        "URGENT NEWS REQUEST | user=%s | chat=%s | admin=%s",
+        message.from_user.id,
+        message.chat.id,
+        admin,
+    )
+
+    if not admin:
+        await message.answer("⛔ Команда /news доступна только администратору.")
         return
 
     since = now_utc() - timedelta(hours=2)
