@@ -231,6 +231,7 @@ async def init_database() -> None:
     await normalize_players_schema()
     for statement in (
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS charactername TEXT",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS firststartseen BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS cash INTEGER",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS activitystatus TEXT NOT NULL DEFAULT 'reader'",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS cashstatus TEXT NOT NULL DEFAULT 'normal'",
