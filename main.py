@@ -204,6 +204,7 @@ async def normalize_players_schema() -> None:
 
 async def init_database() -> None:
     assert db_pool is not None
+
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS players (
@@ -228,9 +229,10 @@ async def init_database() -> None:
         )
         """
     )
+
     await normalize_players_schema()
-    
-        await db_pool.execute(
+
+    await db_pool.execute(
         """
         DO $$
         DECLARE column_type TEXT;
@@ -258,7 +260,22 @@ async def init_database() -> None:
     )
 
     for statement in (
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS username TEXT",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS charactername TEXT",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS str INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS rep INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS con INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS money INTEGER NOT NULL DEFAULT 100",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS lastpost TIMESTAMPTZ",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS anketaurl TEXT",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS badboycount INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS goodboycount INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS strweeklimit INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS repweeklimit INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS conweeklimit INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS moneyweeklimit INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE players ADD COLUMN IF NOT EXISTS weekreset TIMESTAMPTZ",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS firststartseen BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS cash INTEGER",
         "ALTER TABLE players ADD COLUMN IF NOT EXISTS activitystatus TEXT NOT NULL DEFAULT 'reader'",
@@ -272,6 +289,7 @@ async def init_database() -> None:
         "UPDATE players SET cash = COALESCE(cash, money, 100) WHERE cash IS NULL",
     ):
         await db_pool.execute(statement)
+
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS actions (
@@ -285,7 +303,16 @@ async def init_database() -> None:
         )
         """
     )
-    await db_pool.execute("CREATE TABLE IF NOT EXISTS processedmessages (messageid BIGINT PRIMARY KEY, processedat TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processedmessages (
+            messageid BIGINT PRIMARY KEY,
+            processedat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS newsevents (
@@ -307,10 +334,22 @@ async def init_database() -> None:
         )
         """
     )
-    await db_pool.execute("ALTER TABLE newsevents ADD COLUMN IF NOT EXISTS storytag TEXT")
-    await db_pool.execute("ALTER TABLE newsevents ADD COLUMN IF NOT EXISTS statsprocessedat TIMESTAMPTZ")
-    await db_pool.execute("CREATE UNIQUE INDEX IF NOT EXISTS newsevents_source_message_idx ON newsevents(sourcechatid, telegrammessageid)")
-    # Эти таблицы намеренно не используют внешние ключи: старые версии базы имели разные имена ключей.
+
+    await db_pool.execute(
+        "ALTER TABLE newsevents ADD COLUMN IF NOT EXISTS storytag TEXT"
+    )
+
+    await db_pool.execute(
+        "ALTER TABLE newsevents ADD COLUMN IF NOT EXISTS statsprocessedat TIMESTAMPTZ"
+    )
+
+    await db_pool.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS newsevents_source_message_idx
+        ON newsevents(sourcechatid, telegrammessageid)
+        """
+    )
+
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS daily_progress (
@@ -331,6 +370,7 @@ async def init_database() -> None:
         )
         """
     )
+
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS economy_ledger (
@@ -343,6 +383,7 @@ async def init_database() -> None:
         )
         """
     )
+
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS player_achievements (
@@ -354,6 +395,7 @@ async def init_database() -> None:
         )
         """
     )
+
     await db_pool.execute(
         """
         CREATE TABLE IF NOT EXISTS story_threads (
@@ -365,6 +407,7 @@ async def init_database() -> None:
         )
         """
     )
+
     logger.info("Database schema is ready")
 
 
