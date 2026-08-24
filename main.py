@@ -806,7 +806,7 @@ async def build_story_groups(events: list[Any]) -> list[dict[str, Any]]:
     parsed: dict[str, Any] = {}
 
     try:
-        parsed = json_object(
+        parsed = jsonobject(
             result["choices"][0]["message"]["content"]
         )
     except (KeyError, IndexError, TypeError):
