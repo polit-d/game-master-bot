@@ -556,6 +556,47 @@ async def groq(
         )
         return None
 
+def json_object(text: str | None) -> dict:
+    if not text:
+        return {}
+
+    cleaned = text.strip()
+
+    cleaned = re.sub(
+        r"^```(?:json)?\s*|\s*```$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    try:
+        value = json.loads(cleaned)
+
+        if isinstance(value, dict):
+            return value
+
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(
+        r"\{.*\}",
+        cleaned,
+        flags=re.DOTALL,
+    )
+
+    if not match:
+        return {}
+
+    try:
+        value = json.loads(match.group(0))
+
+        if isinstance(value, dict):
+            return value
+
+    except json.JSONDecodeError:
+        pass
+
+    return {}
 
 async def analyze(material: str) -> dict[str, int]:
     result = await groq(
