@@ -1115,23 +1115,49 @@ async def profile_text(player: Any) -> str:
     rl, rs = level(safe_int(player["rep"]))
     cl, cs = level(safe_int(player["con"]))
     cash = safe_int(rget(player, "cash", rget(player, "money", 0)))
-    name = escape(display_name(player))
-    lines = [
-        f"👤 <b>{name}</b>", "",
-        f"💪 STR: {player['str']} — {ss} ({sl})",
-        f"🤝 REP: {player['rep']} — {rs} ({rl})",
-        f"🫀 CON: {player['con']} — {cs} ({cl})",
-        f"💰 CASH: {cash}",
-        f"📊 Активность: {escape(str(rget(player, 'activitystatus', 'reader')))}",
-        f"💳 Денежный статус: {escape(str(rget(player, 'cashstatus', 'normal')))}",
-        f"🎭 Игровая репутация: {rget(player, 'repgame', 0)}",
-        f"🏙 Репутация сообщества: {rget(player, 'repcommunity', 0)}",
-    ]
-    if badge(player): lines.append(badge(player))
-    if rget(player, "anketaurl"):
-        lines.append(f'<a href="{escape(str(player["anketaurl"]), quote=True)}">📄 Анкета</a>')
-    return "\n".join(lines)
 
+    character = escape(str(rget(player, "charactername") or "Без имени"))
+
+    lines = [f"👤 <b>{character}</b>"]
+
+    if rget(player, "anketaurl"):
+        lines.append(
+            f'<a href="{escape(str(player["anketaurl"]), quote=True)}">📄 Анкета</a>'
+        )
+
+    lines.append("")
+    lines.append(f"💪 STR: {player['str']} — {ss} ({sl})")
+    lines.append(f"🤝 REP: {player['rep']} — {rs} ({rl})")
+    lines.append(f"🫀 CON: {player['con']} — {cs} ({cl})")
+    lines.append(f"💰 CASH: {cash}")
+
+    lines.append("")
+    status = str(rget(player, "activitystatus", "reader"))
+    status_label = {
+        "active": "Игрок",
+        "reader": "Читатель",
+        "inactive": "Архив",
+    }.get(status, status)
+    lines.append(f"📌 Статус: {status_label}")
+
+    if badge(player):
+        lines.append("")
+        lines.append("🏅 <b>Ачивки</b>")
+        lines.append(badge(player))
+
+    if rget(player, "businessname"):
+        lines.append(
+            f"🏢 Бизнес: {escape(str(player['businessname']))} · "
+            f"ЗП {safe_int(rget(player, 'businesssalary', 0))}"
+        )
+
+    last = rget(player, "lastpost")
+    if last:
+        lines.append(
+            f"🕒 Последний пост: {last.astimezone(MSK).strftime('%d.%m.%Y %H:%M')}"
+        )
+
+    return "\n".join(lines)
 
 
 
