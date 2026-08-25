@@ -1255,9 +1255,28 @@ async def cmd_anket(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    text = "<b>Команды</b>\n/start\n/profile\n/profile @username\n/setanket URL\n/random str|rep|con|cash @username\n/economy\n/news"
+    text = (
+        "<b>Команды игрока</b>\n\n"
+        "/start — регистрация и имя персонажа\n"
+        "/profile — свой профиль и характеристики\n"
+        "/profile @username — профиль другого игрока\n"
+        "/setanket URL — прикрепить ссылку на анкету\n"
+        "/random str|rep|con|cash @username — случайное сравнение статов\n"
+        "/economy — история операций с CASH\n"
+
+    )
+
     if is_admin(message.from_user.id):
-        text += "\n\n<b>Админские</b>\n/stats\n/player @username\n/setname @username Имя\n/awardcash @username сумма причина\n/business @username Название зарплата"
+        text += (
+            "\n\n<b>Админские команды</b>\n"
+            "/stats — количество игроков, событий и действий\n"
+            "/player @username — профиль игрока\n"
+            "/setname @username Имя — сменить имя персонажа\n"
+            "/awardcash @username сумма причина — начислить или списать CASH\n"
+            "/business @username Название зарплата — назначить бизнес\n"
+            "/news — срочная новость по последним событиям"
+        )
+
     await message.answer(text, parse_mode="HTML")
 
 
