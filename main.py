@@ -62,6 +62,25 @@ ADMIN_IDS = {
     for x in (env("ADMIN_IDS", "ADMINIDS", "") or "").split(",")
     if x.strip().lstrip("-").isdigit()
 }
+RANDOMCITYEVENTS = [
+    "На одной из улиц произошла авария, движение затруднено.",
+    "На площади началась уличная вечеринка с музыкой и танцами.",
+    "Прохожий нашёл на тротуаре потерянный кошелёк с крупной суммой.",
+    "У старого дома замечена странная встреча двух незнакомцев.",
+    "Центральную улицу перекрыли из-за поломки транспорта.",
+    "В жилом квартале вспыхнул пожар, началась эвакуация.",
+    "По улице пробежала убежавшая собака без хозяина.",
+    "Полиция проводит проверку документов у группы прохожих.",
+    "На дороге идут ремонтные работы, работает строительная техника.",
+    "У входа в торговый центр собралась большая толпа людей.",
+    "По проспекту на большой скорости промчался велосипедист.",
+    "Над городом завис дрон, который снимает улицы сверху.",
+    "Внезапно начался сильный ливень, улицы быстро опустели.",
+    "В город приехал важный гость, у здания собрались журналисты.",
+    "На набережной идёт съёмка фильма, работают блогеры.",
+    "В центре города открылось новое крупное заведение, много людей.",
+    "На улице совершенно обычная сцена — люди спешат по своим делам.",
+]
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN")
@@ -887,7 +906,8 @@ async def build_news_from_events(
             "Не превращай каждый пост в отдельный заголовок. "
             "Не выдумывай факты. Сохрани имена персонажей, "
             "важные детали и причинно-следственные связи. "
-            "Пиши на русском языке, 2–5 абзацев.\n\n"
+            "Пиши на русском языке. Каждый сюжетный тег — не больше одного "
+            "короткого абзаца, только суть, как сводка новостей.\n\n"
             f"{source}"
         )
 
@@ -896,8 +916,11 @@ async def build_news_from_events(
                 {
                     "role": "system",
                     "content": (
-                        "Ты редактор новостей ролевого города. "
-                        "Пиши связно, живо и без выдуманных фактов."
+                        "Ты язвительного и интеллектуальный редактор новостей ролевого города. "
+                        "Пиши кратко, как репортажная выжимка. "
+                        "На каждый сюжетный тег выделяй не больше одного абзаца. "
+                        "Описывай только важное, без лишних деталей и повторов. "
+                        "Не выдумывай факты."
                     ),
                 },
                 {
@@ -908,7 +931,7 @@ async def build_news_from_events(
             model=GROQ_MODEL,
             temperature=0.7,
             purpose=f"news_story_group_{group_index}",
-            max_completion_tokens=650,
+            max_completion_tokens=350,
         )
 
         try:
@@ -959,10 +982,89 @@ async def build_news_from_events(
 
     return final_text, list(dict.fromkeys(used_event_ids))
 
+async def build_random_news(
+    urgent: bool = False,
+) -> tuple[str, list[int]] | None:
+    if not RANDOMCITYEVENTS:
+        return None
+
+    event = random.choice(RANDOMCITYEVENTS)
+
+    mode = "СРОЧНАЯ НОВОСТЬ" if urgent else "ОБЫЧНАЯ НОВОСТЬ"
+
+    prompt = (
+        f"{mode}.\n"
+        "Это событие из жизни города, о котором сообщили очевидцы.\n\n"
+        "Напиши короткую новость, как репортажную выжимку: "
+        "не больше одного абзаца, только важное, без выдуманных "
+        "имен и деталей.\n\n"
+        f"Событие: {event}"
+    )
+
+    result = await groq(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Ты редактор новостей ролевого города. "
+                    "Пиши кратко и живо, без выдуманных фактов."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        model=GROQ_MODEL,
+        temperature=0.8,
+        purpose="random_city_news",
+        max_completion_tokens=250,
+    )
+
+    try:
+        text = result["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, AttributeError):
+        logger.exception("RANDOM NEWS INVALID RESPONSE")
+        return None
+
+    if not text:
+        logger.warning("RANDOM NEWS EMPTY")
+        return None
+
+    logger.info("RANDOM NEWS GENERATED chars=%s", len(text))
+
+    return text, []
 
 async def generate_news() -> tuple[str, list[int]] | None:
     events = await get_news_events(limit=300)
-    return await build_news_from_events(events)
+
+    if events:
+        result = await build_news_from_events(events)
+
+        # Редко (примерно раз в 12 циклов) добавляем рандомную
+        # новость к основным событиям.
+        if result and random.random() < 0.08:
+            random_result = await build_random_news()
+
+            if random_result:
+                random_text, _ = random_result
+                main_text, ids = result
+                combined = (
+                    f"{main_text}\n\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"{random_text}"
+                )
+                logger.info(
+                    "RANDOM NEWS ADDED TO MAIN events=%s",
+                    len(ids),
+                )
+                return combined, ids
+
+        return result
+
+    # Если событий нет — публикуем рандомную новость.
+    logger.info("NO EVENTS — using random city news")
+    return await build_random_news()
 
 
 async def news_loop():
