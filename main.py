@@ -776,8 +776,10 @@ async def get_news_events(*, since: datetime | None = None, limit: int = 300) ->
     params.append(limit)
     return await db_pool.fetch(query, *params)
 
-async def build_story_groups(events: list[Any]) -> list[dict[str, Any]]:
-    tagged_events: dict[str, list[Any]] = {}
+async def build_story_groups(
+    events: list[Any],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[Any]] = {}
 
     for event in events:
         tag = (event["storytag"] or "").strip().lower()
@@ -785,126 +787,36 @@ async def build_story_groups(events: list[Any]) -> list[dict[str, Any]]:
         if not tag:
             tag = "без-тега"
 
-        tagged_events.setdefault(tag, []).append(event)
+        groups.setdefault(tag, []).append(event)
 
-    tags = list(tagged_events.keys())
+    result: list[dict[str, Any]] = []
 
-    if not tags:
-        return []
-
-    if len(tags) == 1:
-        return [
+    for tag, tag_events in groups.items():
+        result.append(
             {
-                "title": tags[0],
-                "tags": tags,
+                "title": tag,
+                "tags": [tag],
+                "event_ids": [
+                    event["id"]
+                    for event in tag_events
+                ],
             }
-        ]
-
-    compact_lines = []
-
-    for tag, tag_events in tagged_events.items():
-        examples = []
-
-        for event in tag_events[:3]:
-            text = (event["text"] or "").replace("\n", " ").strip()
-            examples.append(text[:350])
-
-        compact_lines.append(
-            f"ТЕГ: #{tag}\n"
-            f"ПРИМЕРЫ: {' | '.join(examples)}"
         )
-
-    compact_material = "\n\n".join(compact_lines)[:10000]
-
-    result = await groq(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты редактор сюжетных линий ролевой игры. "
-                    "Объедини связанные хэштеги в общие сюжетные линии. "
-                    "Теги можно объединять, если они описывают одно событие, "
-                    "один конфликт, одну локацию или последовательное развитие "
-                    "одной истории. Несвязанные теги не объединяй. "
-                    "Верни только JSON без markdown в формате: "
-                    "{\"groups\":["
-                    "{\"title\":\"название сюжета\","
-                    "\"tags\":[\"tag1\",\"tag2\"]}"
-                    "]}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": compact_material,
-            },
-        ],
-        model=GROQ_STRUCTURED_MODEL,
-        temperature=0.1,
-        purpose="story_tag_grouping",
-        max_completion_tokens=500,
-    )
-
-    parsed: dict[str, Any] = {}
-
-    try:
-        parsed = json_object(
-            result["choices"][0]["message"]["content"]
-        )
-    except (KeyError, IndexError, TypeError):
-        logger.exception("STORY GROUPING INVALID RESPONSE")
-
-    groups: list[dict[str, Any]] = []
-    assigned_tags: set[str] = set()
-
-    raw_groups = parsed.get("groups", [])
-
-    if isinstance(raw_groups, list):
-        for raw_group in raw_groups:
-            if not isinstance(raw_group, dict):
-                continue
-
-            raw_tags = raw_group.get("tags", [])
-
-            if not isinstance(raw_tags, list):
-                continue
-
-            valid_tags = []
-
-            for raw_tag in raw_tags:
-                normalized_tag = str(raw_tag).strip().lower()
-
-                if normalized_tag in tagged_events:
-                    valid_tags.append(normalized_tag)
-                    assigned_tags.add(normalized_tag)
-
-            if valid_tags:
-                groups.append(
-                    {
-                        "title": str(
-                            raw_group.get("title")
-                            or valid_tags[0]
-                        )[:120],
-                        "tags": list(dict.fromkeys(valid_tags)),
-                    }
-                )
-
-    for tag in tags:
-        if tag not in assigned_tags:
-            groups.append(
-                {
-                    "title": tag,
-                    "tags": [tag],
-                }
-            )
 
     logger.info(
-        "STORY GROUPS tags=%s groups=%s details=%s",
-        len(tags),
+        "STORY GROUPS STRICT tags=%s groups=%s details=%s",
         len(groups),
-        groups,
+        len(result),
+        [
+            {
+                "title": group["title"],
+                "events": len(group["event_ids"]),
+            }
+            for group in result
+        ],
     )
 
-    return groups
+    return result
 
 async def build_news_from_events(
     events: list[Any],
