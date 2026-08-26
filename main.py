@@ -760,18 +760,7 @@ async def process_daily(progress_date: date):
         await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,-2,'расходы читателя',$2)", user_id, progress_date)
     logger.info("Daily progress processed: %s", progress_date)
 
-async def process_daily(progress_date: date):
-    # ... весь существующий код ...
-    
-    # Обработка читателей (уже есть)
-    readers = await db_pool.fetch(...)
-    for row in readers:
-        # ... уже есть ...
-    
-    logger.info("Daily progress processed: %s", progress_date)
-    
-    # === ДОБАВИТЬ ВОТ ЭТО ===
-    # Сброс неактивных (30 дней без постов)
+# Сброс неактивных (30 дней без постов)
     thirty_days_ago = now_utc() - timedelta(days=30)
     inactive = await db_pool.fetch(
         """
@@ -805,7 +794,93 @@ async def process_daily(progress_date: date):
             )
         except Exception:
             logger.exception("Не удалось отправить уведомление игроку %s", user_id)
-    # === КОНЕЦ ДОБАВЛЕНИЯ ===
+
+async def process_daily(progress_date: date):
+    start = datetime.combine(progress_date, datetime.min.time(), tzinfo=MSK).astimezone(UTC)
+    end = start + timedelta(days=1)
+    events = await db_pool.fetch(
+        """
+        SELECT e.*
+        FROM newsevents e
+        INNER JOIN players p ON p.userid = e.userid
+        WHERE e.createdat >= $1 AND e.createdat < $2
+          AND e.statsprocessedat IS NULL
+          AND e.topicid = ANY($3::int[])
+        ORDER BY e.userid, e.createdat
+        """,
+        start, end, [GAME_TOPIC_ID, SEMI_TOPIC_ID, PROFILES_TOPIC_ID],
+    )
+    grouped: dict[int, list[Any]] = {}
+    for event in events:
+        grouped.setdefault(safe_int(event["userid"]), []).append(event)
+    for user_id, player_events in grouped.items():
+        if await db_pool.fetchval("SELECT 1 FROM daily_progress WHERE userid=$1 AND progressdate=$2", user_id, progress_date):
+            continue
+        material = "\n\n".join(
+            f"#{event['storytag'] if event['storytag'] else 'Р±РµР·-С‚РµРіР°'} | {event['topicname'] or ''}\n{event['text']}"
+            for event in player_events
+        )
+        chars = sum(len(event["text"] or "") for event in player_events)
+        result = await analyze(material) if chars >= 300 else {"str": 0, "rep": 0, "con": 0, "cash": 0, "goodboy": 0, "badboy": 0}
+        player = await reset_week(await get_player(user_id))
+        if not player:
+            continue
+        str_add = min(result["str"], max(0, 3 - safe_int(player["strweeklimit"])))
+        rep_add = min(result["rep"], max(0, 7 - safe_int(player["repweeklimit"])))
+        con_add = min(result["con"], max(0, 8 - safe_int(player["conweeklimit"])))
+        ai_cash = min(result["cash"], max(0, 1000 - safe_int(player["moneyweeklimit"])))
+        cash_delta = -5 + 10 + ai_cash
+        await db_pool.execute(
+            """
+            INSERT INTO daily_progress(userid,progressdate,posts_count,text_chars,str_delta,rep_delta,con_delta,cash_delta,goodboy_delta,badboy_delta,material)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            """,
+            user_id, progress_date, len(player_events), chars, str_add, rep_add, con_add, cash_delta, result["goodboy"], result["badboy"], material[:24000],
+        )
+        await db_pool.execute(
+            """
+            UPDATE players SET str=str+$1, rep=rep+$2, con=con+$3,
+            money=money+$4, cash=COALESCE(cash,money)+$4,
+            strweeklimit=strweeklimit+$1, repweeklimit=repweeklimit+$2, conweeklimit=conweeklimit+$3,
+            moneyweeklimit=moneyweeklimit+$5, goodboycount=goodboycount+$6, badboycount=badboycount+$7,
+            activitystatus='active', lastpost=$8,
+            cashstatus=CASE WHEN COALESCE(cash,money)+$4 <= 0 THEN 'РќРёС‰РёР№' ELSE 'normal' END
+            WHERE userid=$9
+            """,
+            str_add, rep_add, con_add, cash_delta, ai_cash, result["goodboy"], result["badboy"], now_utc(), user_id,
+        )
+        await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,-5,'СЂР°СЃС…РѕРґС‹ Р°РєС‚РёРІРЅРѕРіРѕ РґРЅСЏ',$2)", user_id, progress_date)
+        await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,$2,'РЅР°РіСЂР°РґР° Р°РєС‚РёРІРЅРѕРіРѕ РґРЅСЏ Рё Р°РЅР°Р»РёР·',$3)", user_id, 10 + ai_cash, progress_date)
+        for achievement, value in (("GoodBoy", result["goodboy"]), ("BadBoy", result["badboy"])):
+            await db_pool.execute(
+                """
+                INSERT INTO player_achievements(userid,achievement,count) VALUES($1,$2,$3)
+                ON CONFLICT(userid,achievement) DO UPDATE SET count=player_achievements.count+EXCLUDED.count, updatedat=NOW()
+                """,
+                user_id, achievement, value,
+            )
+        await db_pool.execute("UPDATE newsevents SET statsprocessedat=NOW() WHERE id=ANY($1::bigint[])", [event["id"] for event in player_events])
+    readers = await db_pool.fetch(
+        """
+        SELECT p.userid FROM players p WHERE NOT EXISTS(
+            SELECT 1 FROM daily_progress d WHERE d.userid=p.userid AND d.progressdate=$1
+        )
+        """,
+        progress_date,
+    )
+    for row in readers:
+        user_id = row["userid"]
+        await db_pool.execute("INSERT INTO daily_progress(userid,progressdate,cash_delta) VALUES($1,$2,-2) ON CONFLICT DO NOTHING", user_id, progress_date)
+        await db_pool.execute(
+            """
+            UPDATE players SET money=money-2, cash=COALESCE(cash,money)-2, activitystatus='reader',
+            cashstatus=CASE WHEN COALESCE(cash,money)-2 <= 0 THEN 'РќРёС‰РёР№' ELSE cashstatus END
+            WHERE userid=$1
+            """,
+            user_id,
+        )
+        await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,-2,'СЂР°СЃС…РѕРґС‹ С‡РёС‚Р°С‚РµР»СЏ',$2)", user_id, progress_date)
+    logger.info("Daily progress processed: %s", progress_date)
 
 async def daily_loop():
     while True:
