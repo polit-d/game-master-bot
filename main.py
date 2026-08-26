@@ -761,39 +761,39 @@ async def process_daily(progress_date: date):
     logger.info("Daily progress processed: %s", progress_date)
 
 # Сброс неактивных (30 дней без постов)
-    thirty_days_ago = now_utc() - timedelta(days=30)
-    inactive = await db_pool.fetch(
+thirty_days_ago = now_utc() - timedelta(days=30)
+inactive = await db_pool.fetch(
+    """
+    SELECT userid FROM players
+    WHERE lastpost IS NOT NULL
+      AND lastpost < $1
+      AND activitystatus != 'inactive'
+    """,
+    thirty_days_ago,
+)
+for row in inactive:
+    user_id = row["userid"]
+    await db_pool.execute(
         """
-        SELECT userid FROM players
-        WHERE lastpost IS NOT NULL
-          AND lastpost < $1
-          AND activitystatus != 'inactive'
+        UPDATE players
+        SET str=1, rep=1, con=1, money=100,
+            cash=100,
+            activitystatus='inactive',
+            strweeklimit=0, repweeklimit=0, conweeklimit=0, moneyweeklimit=0
+        WHERE userid=$1
         """,
-        thirty_days_ago,
+        user_id,
     )
-    for row in inactive:
-        user_id = row["userid"]
-        await db_pool.execute(
-            """
-            UPDATE players
-            SET str=4, rep=4, con=4, money=500,
-                cash=500,
-                activitystatus='inactive',
-                strweeklimit=0, repweeklimit=0, conweeklimit=0, moneyweeklimit=0
-            WHERE userid=$1
-            """,
+    logger.info("Player %s archived (inactive 30+ days)", user_id)
+    try:
+        await bot.send_message(
             user_id,
+            "📦 Вы переведены в статус «Архив» из-за неактивности (30+ дней).\n\n"
+            "Ваши статы сброшены: STR 1, REP 1, CON 1, MONEY 100.\n"
+            "Начните писать снова, чтобы вернуться в игру."
         )
-        logger.info("Player %s archived (inactive 30+ days)", user_id)
-        try:
-            await bot.send_message(
-                user_id,
-                "📦 Вы переведены в статус «Архив» из-за неактивности (30+ дней).\n\n"
-                "Ваши статы сброшены: STR 4, REP 4, CON 4, MONEY 500.\n"
-                "Начните писать снова, чтобы вернуться в игру."
-            )
-        except Exception:
-            logger.exception("Не удалось отправить уведомление игроку %s", user_id)
+    except Exception:
+        logger.exception("Не удалось отправить уведомление игроку %s", user_id)
 
 async def process_daily(progress_date: date):
     start = datetime.combine(progress_date, datetime.min.time(), tzinfo=MSK).astimezone(UTC)
