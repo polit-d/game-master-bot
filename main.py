@@ -760,40 +760,40 @@ async def process_daily(progress_date: date):
         await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,-2,'расходы читателя',$2)", user_id, progress_date)
     logger.info("Daily progress processed: %s", progress_date)
 
-# Сброс неактивных (30 дней без постов)
-thirty_days_ago = now_utc() - timedelta(days=30)
-inactive = await db_pool.fetch(
-    """
-    SELECT userid FROM players
-    WHERE lastpost IS NOT NULL
-      AND lastpost < $1
-      AND activitystatus != 'inactive'
-    """,
-    thirty_days_ago,
-)
-for row in inactive:
-    user_id = row["userid"]
-    await db_pool.execute(
+    # Сброс неактивных (30 дней без постов)
+    thirty_days_ago = now_utc() - timedelta(days=30)
+    inactive = await db_pool.fetch(
         """
-        UPDATE players
-        SET str=1, rep=1, con=1, money=100,
-            cash=100,
-            activitystatus='inactive',
-            strweeklimit=0, repweeklimit=0, conweeklimit=0, moneyweeklimit=0
-        WHERE userid=$1
+        SELECT userid FROM players
+        WHERE lastpost IS NOT NULL
+          AND lastpost < $1
+          AND activitystatus != 'inactive'
         """,
-        user_id,
+        thirty_days_ago,
     )
-    logger.info("Player %s archived (inactive 30+ days)", user_id)
-    try:
-        await bot.send_message(
+    for row in inactive:
+        user_id = row["userid"]
+        await db_pool.execute(
+            """
+            UPDATE players
+            SET str=1, rep=1, con=1, money=100,
+                cash=100,
+                activitystatus='inactive',
+                strweeklimit=0, repweeklimit=0, conweeklimit=0, moneyweeklimit=0
+            WHERE userid=$1
+            """,
             user_id,
-            "📦 Вы переведены в статус «Архив» из-за неактивности (30+ дней).\n\n"
-            "Ваши статы сброшены: STR 1, REP 1, CON 1, MONEY 100.\n"
-            "Начните писать снова, чтобы вернуться в игру."
         )
-    except Exception:
-        logger.exception("Не удалось отправить уведомление игроку %s", user_id)
+        logger.info("Player %s archived (inactive 30+ days)", user_id)
+        try:
+            await bot.send_message(
+                user_id,
+                "📦 Вы переведены в статус «Архив» из-за неактивности (30+ дней).\n\n"
+                "Ваши статы сброшены: STR 1, REP 1, CON 1, MONEY 100.\n"
+                "Начните писать снова, чтобы вернуться в игру."
+            )
+        except Exception:
+            logger.exception("Не удалось отправить уведомление игроку %s", user_id)
 
 async def process_daily(progress_date: date):
     start = datetime.combine(progress_date, datetime.min.time(), tzinfo=MSK).astimezone(UTC)
