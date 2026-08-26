@@ -760,6 +760,52 @@ async def process_daily(progress_date: date):
         await db_pool.execute("INSERT INTO economy_ledger(userid,amount,reason,progressdate) VALUES($1,-2,'расходы читателя',$2)", user_id, progress_date)
     logger.info("Daily progress processed: %s", progress_date)
 
+async def process_daily(progress_date: date):
+    # ... весь существующий код ...
+    
+    # Обработка читателей (уже есть)
+    readers = await db_pool.fetch(...)
+    for row in readers:
+        # ... уже есть ...
+    
+    logger.info("Daily progress processed: %s", progress_date)
+    
+    # === ДОБАВИТЬ ВОТ ЭТО ===
+    # Сброс неактивных (30 дней без постов)
+    thirty_days_ago = now_utc() - timedelta(days=30)
+    inactive = await db_pool.fetch(
+        """
+        SELECT userid FROM players
+        WHERE lastpost IS NOT NULL
+          AND lastpost < $1
+          AND activitystatus != 'inactive'
+        """,
+        thirty_days_ago,
+    )
+    for row in inactive:
+        user_id = row["userid"]
+        await db_pool.execute(
+            """
+            UPDATE players
+            SET str=4, rep=4, con=4, money=500,
+                cash=500,
+                activitystatus='inactive',
+                strweeklimit=0, repweeklimit=0, conweeklimit=0, moneyweeklimit=0
+            WHERE userid=$1
+            """,
+            user_id,
+        )
+        logger.info("Player %s archived (inactive 30+ days)", user_id)
+        try:
+            await bot.send_message(
+                user_id,
+                "📦 Вы переведены в статус «Архив» из-за неактивности (30+ дней).\n\n"
+                "Ваши статы сброшены: STR 4, REP 4, CON 4, MONEY 500.\n"
+                "Начните писать снова, чтобы вернуться в игру."
+            )
+        except Exception:
+            logger.exception("Не удалось отправить уведомление игроку %s", user_id)
+    # === КОНЕЦ ДОБАВЛЕНИЯ ===
 
 async def daily_loop():
     while True:
