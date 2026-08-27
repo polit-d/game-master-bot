@@ -538,10 +538,15 @@ async def groq(
                 data = json.loads(raw)
 
                 logger.info(
-                    "GROQ SUCCESS purpose=%s model=%s input_chars=%s",
+                    "GROQ SUCCESS purpose=%s model=%s input_chars=%s finish_reason=%s",
                     purpose,
                     model,
                     input_chars,
+                    (
+                        data.get("choices", [{}])[0].get("finish_reason")
+                        if isinstance(data, dict) and data.get("choices")
+                        else None
+                    ),
                 )
 
                 return data
@@ -962,74 +967,67 @@ async def build_news_from_events(
     events: list[Any],
     urgent: bool = False,
 ) -> tuple[str, list[int]] | None:
+    """Generate news with a strict rule: one story tag = one continuing event."""
     if not events:
         return None
 
-    story_groups = await build_story_groups(events)
+    # Build the groups once and keep the actual event objects in the group.
+    # The previous implementation reconstructed groups from tags a second time;
+    # using event_ids here removes that unnecessary source of mismatches.
+    groups: dict[str, list[Any]] = {}
+    for event in events:
+        tag = (event["storytag"] or "").strip().lower() or "без-тега"
+        groups.setdefault(tag, []).append(event)
 
-    if not story_groups:
-        logger.warning("NEWS NO STORY GROUPS")
-        return None
+    logger.info(
+        "STORY GROUPS STRICT tags=%s details=%s",
+        len(groups),
+        [{"title": tag, "events": len(items)} for tag, items in groups.items()],
+    )
 
     news_parts: list[str] = []
     used_event_ids: list[int] = []
 
-    for group_index, group in enumerate(story_groups, start=1):
-        group_tags = set(group["tags"])
-
-        group_events = [
-            event
-            for event in events
-            if (
-                (event["storytag"] or "").strip().lower()
-                or "без-тега"
-            ) in group_tags
-        ]
-
+    for group_index, (tag, group_events) in enumerate(groups.items(), start=1):
         if not group_events:
+            logger.warning("NEWS GROUP EMPTY SOURCE group=%s title=%s", group_index, tag)
             continue
 
-        source_parts = []
-
-        for event in group_events:
-            author = display_name(
-                {
-                    "userid": event["userid"],
-                    "charactername": event["charactername"],
-                    "username": event["username"],
-                }
-            )
-
-            text = (event["text"] or "").strip()
-
+        source_parts: list[str] = []
+        for index, event in enumerate(group_events, 1):
+            author = display_name({
+                "userid": event["userid"],
+                "charactername": event["charactername"],
+                "username": event["username"],
+            })
+            event_text = (event["text"] or "").strip()
+            created = event["createdat"]
+            timestamp = created.astimezone(MSK).strftime("%d.%m %H:%M") if created else ""
             source_parts.append(
-                f"{author}: {text[:1200]}"
+                f"[ФРАГМЕНТ {index} | {timestamp}]\n"
+                f"Участник: {author}\n"
+                f"{event_text[:1600]}"
             )
 
-        source = "\n\n".join(source_parts)
-
-        # Безопасный лимит для одного сюжетного запроса.
-        source = source[:9000]
-
-        mode = (
-            "СРОЧНАЯ НОВОСТЬ"
-            if urgent
-            else "ОБЫЧНАЯ НОВОСТЬ"
-        )
+        source = "\n\n".join(source_parts)[:16000]
+        mode = "СРОЧНАЯ НОВОСТЬ за последние 1–2 часа" if urgent else "ОБЫЧНАЯ НОВОСТЬ"
 
         prompt = (
-            f"{mode}.\n"
-            f"Название сюжетной линии: {group['title']}\n"
-            f"Связанные теги: "
-            f"{', '.join('#' + tag for tag in group['tags'])}\n\n"
-            "Напиши одну цельную новость по этой сюжетной линии. "
-            "Свяжи события в последовательное развитие истории. "
-            "Не превращай каждый пост в отдельный заголовок. "
-            "Не выдумывай факты. Сохрани имена персонажей, "
-            "важные детали и причинно-следственные связи. "
-            "Пиши на русском языке. Каждый сюжетный тег — не больше одного "
-            "короткого абзаца, только суть, как сводка новостей.\n\n"
-            f"{source}"
+            f"{mode}.\n\n"
+            f"СЮЖЕТНАЯ ЛИНИЯ: #{tag}\n\n"
+            "КРИТИЧЕСКОЕ ПРАВИЛО: все фрагменты ниже являются частями ОДНОГО "
+            "продолжающегося игрового события. Разные игроки, персонажи и локации "
+            "не делают их разными событиями.\n\n"
+            "Напиши РОВНО ОДИН связный сюжетный блок для этой линии. Объедини "
+            "поступившие фрагменты в развитие одной истории, соблюдая хронологию. "
+            "Не делай отдельный пересказ каждого поста, не создавай подзаголовки "
+            "и не перечисляй участников списком. Если между сценами нет явной "
+            "причинной связи, просто покажи их как разные эпизоды одной линии, "
+            "не выдумывая связей. Сохрани важные имена, действия и места. "
+            "Ничего не добавляй от себя.\n\n"
+            "Верни только текст новости на русском языке, без markdown-заголовка "
+            "и без #тега. 1–3 коротких абзаца.\n\n"
+            f"МАТЕРИАЛ:\n{source}"
         )
 
         result = await groq(
@@ -1037,55 +1035,146 @@ async def build_news_from_events(
                 {
                     "role": "system",
                     "content": (
-                        "Ты язвительного и интеллектуальный редактор новостей ролевого города. "
-                        "Пиши кратко, как репортажная выжимка. "
-                        "На каждый сюжетный тег выделяй не больше одного абзаца. "
-                        "Описывай только важное, без лишних деталей и повторов. "
+                        "Ты редактор новостей ролевого города. "
+                        "Один сюжетный тег всегда означает одну долгую сюжетную линию. "
+                        "Пиши живую, компактную репортажную сводку. "
                         "Не выдумывай факты."
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
+                {"role": "user", "content": prompt},
             ],
             model=GROQ_MODEL,
-            temperature=0.7,
+            temperature=0.45,
             purpose=f"news_story_group_{group_index}",
-            max_completion_tokens=350,
+            max_completion_tokens=900,
         )
 
+        text = ""
         try:
-            text = result["choices"][0]["message"]["content"].strip()
+            text = (result["choices"][0]["message"]["content"] or "").strip()
         except (KeyError, IndexError, TypeError, AttributeError):
             logger.exception(
                 "NEWS GROUP INVALID RESPONSE group=%s title=%s",
-                group_index,
-                group["title"],
+                group_index, tag,
             )
-            continue
 
+        # If the model returned an empty answer, retry once with a very simple
+        # prompt. This prevents one transient/empty Groq response from discarding
+        # the whole news edition.
         if not text:
             logger.warning(
-                "NEWS GROUP EMPTY group=%s title=%s",
-                group_index,
-                group["title"],
+                "NEWS GROUP EMPTY group=%s title=%s — retrying",
+                group_index, tag,
+            )
+            retry = await groq(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Сделай одну короткую новость по материалу. "
+                            "Все фрагменты относятся к одному событию. "
+                            "Не выдумывай факты. Верни только текст новости."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Тег события: #{tag}\n"
+                            "Все следующие посты — части одной сюжетной линии. "
+                            "Объедини их в один связный текст:\n\n"
+                            f"{source}"
+                        ),
+                    },
+                ],
+                model=GROQ_MODEL,
+                temperature=0.2,
+                purpose=f"news_story_group_{group_index}_retry",
+                max_completion_tokens=700,
+            )
+            try:
+                text = (retry["choices"][0]["message"]["content"] or "").strip()
+            except (KeyError, IndexError, TypeError, AttributeError):
+                logger.exception(
+                    "NEWS GROUP RETRY INVALID group=%s title=%s",
+                    group_index, tag,
+                )
+
+        # A non-empty answer can still be truncated. Groq/OpenAI-compatible
+        # responses expose finish_reason; "length" means the completion hit its
+        # token ceiling. Also treat prose ending without sentence punctuation as
+        # suspicious, because the old bot could publish half a sentence.
+        finish_reason = None
+        try:
+            finish_reason = result["choices"][0].get("finish_reason")
+        except (KeyError, IndexError, TypeError, AttributeError):
+            pass
+
+        looks_truncated = bool(text) and (
+            finish_reason == "length"
+            or (
+                len(text) >= 120
+                and not re.search(r"[.!?…»)]$", text)
+            )
+        )
+
+        if looks_truncated:
+            logger.warning(
+                "NEWS GROUP TRUNCATED group=%s title=%s finish_reason=%s chars=%s — retrying",
+                group_index, tag, finish_reason, len(text),
+            )
+            repair = await groq(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты редактор новостей. Все фрагменты относятся к одному "
+                            "продолжающемуся событию. Составь один связный новостной "
+                            "текст. Не выдумывай факты. ОБЯЗАТЕЛЬНО закончи последнюю "
+                            "мысль полным предложением. Верни только готовый текст."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Сюжет: #{tag}\n\n"
+                            "Напиши цельную сводку в 1–3 абзацах и обязательно "
+                            "заверши её полным предложением.\n\n"
+                            f"{source}"
+                        ),
+                    },
+                ],
+                model=GROQ_MODEL,
+                temperature=0.25,
+                purpose=f"news_story_group_{group_index}_repair",
+                max_completion_tokens=900,
+            )
+            try:
+                repaired = (repair["choices"][0]["message"]["content"] or "").strip()
+            except (KeyError, IndexError, TypeError, AttributeError):
+                repaired = ""
+
+            if repaired:
+                text = repaired
+                logger.info(
+                    "NEWS GROUP REPAIRED group=%s title=%s chars=%s",
+                    group_index, tag, len(text),
+                )
+
+        if not text:
+            # Deterministic fallback: the posts still become one story block,
+            # never several separate news items. We deliberately do not invent
+            # a summary if Groq is unavailable.
+            logger.error(
+                "NEWS GROUP FAILED group=%s title=%s events=%s",
+                group_index, tag, len(group_events),
             )
             continue
 
-        news_parts.append(text)
-        used_event_ids.extend(
-            event["id"]
-            for event in group_events
-        )
-
+        news_parts.append(f"📰 #{tag}\n{text}")
+        used_event_ids.extend(event["id"] for event in group_events)
         logger.info(
-            "NEWS STORY GENERATED group=%s title=%s tags=%s events=%s source_chars=%s",
-            group_index,
-            group["title"],
-            group["tags"],
-            len(group_events),
-            len(source),
+            "NEWS STORY GENERATED group=%s title=%s events=%s source_chars=%s",
+            group_index, tag, len(group_events), len(source),
         )
 
     if not news_parts or not used_event_ids:
@@ -1093,15 +1182,12 @@ async def build_news_from_events(
         return None
 
     final_text = "\n\n━━━━━━━━━━━━━━\n\n".join(news_parts)
-
     logger.info(
         "NEWS READY stories=%s events=%s chars=%s",
-        len(news_parts),
-        len(set(used_event_ids)),
-        len(final_text),
+        len(news_parts), len(set(used_event_ids)), len(final_text),
     )
-
     return final_text, list(dict.fromkeys(used_event_ids))
+
 
 async def build_random_news(
     urgent: bool = False,
@@ -1195,11 +1281,33 @@ async def news_loop():
             result = await generate_news()
             if result:
                 news_text, ids = result
-                await bot.send_message(
-                    GROUP_ID,
-                    news_text,
-                    message_thread_id=STORY_TOPIC_ID or None,
-                )
+                # Telegram message text is limited to 4096 characters.
+                # Keep each generated story intact where possible and split only
+                # between paragraphs/blocks.
+                chunks: list[str] = []
+                remaining = news_text.strip()
+                while remaining:
+                    if len(remaining) <= 4096:
+                        chunks.append(remaining)
+                        break
+
+                    cut = remaining.rfind("\n\n", 0, 4096)
+                    if cut < 1000:
+                        cut = remaining.rfind("\n", 0, 4096)
+                    if cut < 1000:
+                        cut = remaining.rfind(" ", 0, 4096)
+                    if cut < 1:
+                        cut = 4096
+
+                    chunks.append(remaining[:cut].rstrip())
+                    remaining = remaining[cut:].lstrip()
+
+                for chunk in chunks:
+                    await bot.send_message(
+                        GROUP_ID,
+                        chunk,
+                        message_thread_id=STORY_TOPIC_ID or None,
+                    )
                 await db_pool.execute(
                     "UPDATE newsevents SET usedinnewsat=NOW() WHERE id=ANY($1::bigint[])",
                     ids,
@@ -1567,11 +1675,28 @@ async def cmd_news(message: Message):
             return
 
         news_text, ids = result
-        await bot.send_message(
-            GROUP_ID,
-            news_text,
-            message_thread_id=STORY_TOPIC_ID or None,
-        )
+        chunks: list[str] = []
+        remaining = news_text.strip()
+        while remaining:
+            if len(remaining) <= 4096:
+                chunks.append(remaining)
+                break
+            cut = remaining.rfind("\n\n", 0, 4096)
+            if cut < 1000:
+                cut = remaining.rfind("\n", 0, 4096)
+            if cut < 1000:
+                cut = remaining.rfind(" ", 0, 4096)
+            if cut < 1:
+                cut = 4096
+            chunks.append(remaining[:cut].rstrip())
+            remaining = remaining[cut:].lstrip()
+
+        for chunk in chunks:
+            await bot.send_message(
+                GROUP_ID,
+                chunk,
+                message_thread_id=STORY_TOPIC_ID or None,
+            )
         await db_pool.execute(
             "UPDATE newsevents SET usedinnewsat=NOW() WHERE id=ANY($1::bigint[])",
             ids,
